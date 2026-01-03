@@ -11,7 +11,7 @@ from metrics import dice_loss
 from eval import eval_net
 
 from torch.utils.tensorboard import SummaryWriter
-from utils.dataset import CoronaryArterySegmentationDataset, RetinaSegmentationDataset
+from utils.dataset import CoronaryArterySegmentationDataset, RetinaSegmentationDataset, BasicSegmentationDataset
 from torch.utils.data import DataLoader
 from kornia.losses import focal_loss
 
@@ -35,8 +35,10 @@ def train_net(net,
     val = validation_set
     n_train = len(train)
     n_val = len(val)
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True)
-    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=8, pin_memory=True)
+    
+    # CHANGED: Reduced num_workers to 2 to prevent Windows "BrokenPipeError"
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
     # Sets the effective batch size according to the batch size and the data augmentation ratio
     batch_size = (1 + augmentation_ratio)*batch_size
@@ -55,11 +57,14 @@ def train_net(net,
         Device:          {device.type}
         Images scaling:  {img_scale}
         Augmentation ratio: {augmentation_ratio}
+        Classes:         {n_classes}
     ''')
 
     # Choose the optimizer and scheduler 
     optimizer = optim.Adam(net.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, epochs//3, gamma=0.1, verbose=True)
+    # scheduler = optim.lr_scheduler.StepLR(optimizer, epochs//3, gamma=0.1, verbose=True)
+    # CHANGED: Switched to ReduceLROnPlateau to adapt to validation loss
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
 
     # Train loop
     for epoch in range(epochs):
@@ -69,7 +74,8 @@ def train_net(net,
             for batch in train_loader:
                 imgs = batch['image']
                 true_masks = batch['mask']
-                # DataLoaders return lists of tensors. TODO: Concatenate the lists inside the DataLoaders
+                
+                # Concatenate the lists inside the DataLoaders
                 imgs = torch.cat(imgs, dim = 0)
                 true_masks = torch.cat(true_masks, dim = 0)
 
@@ -85,8 +91,13 @@ def train_net(net,
                 masks_pred = net(imgs)                         
                 
                 # Compute loss
-                loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma = 2, reduction='mean').unsqueeze(0)
-                loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k = 0.75)
+                if n_classes == 1:
+                    # Binary Focal Loss
+                    loss = focal_loss(masks_pred, true_masks, alpha=0.25, gamma=2, reduction='mean')
+                    loss += dice_loss(masks_pred, true_masks, multiclass=False)
+                else:
+                    loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
+                    loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
 
                 epoch_loss += loss.item()
                 writer.add_scalar('Loss/train', loss.item(), global_step)
@@ -99,29 +110,45 @@ def train_net(net,
 
                 pbar.update(imgs.shape[0]//(1 + augmentation_ratio))
                 global_step += 1
+                
+                # Validation Step
                 if global_step % (n_train // (batch_size / (1 + augmentation_ratio))) == 0:
                     for tag, value in net.named_parameters():
                         tag = tag.replace('.', '/')
-                        
                         try:
                             writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
                             writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
                         except:
                             pass
                     
-                    epoch_score = eval_net(net, train_loader, device)
-                    val_score = eval_net(net, val_loader, device)
+                    # CHANGED: Handle dictionary return from updated eval_net
+                    val_metrics = eval_net(net, val_loader, device, n_classes)
+                    
+                    # Extract loss for scheduler
+                    val_score = val_metrics['loss']
+                    scheduler.step(val_score)
+
                     writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
 
-                    if n_classes > 1:
-                        logging.info('Validation loss: {}'.format(val_score))
-                        writer.add_scalar('Generalized dice loss/train', epoch_score, global_step)
-                        writer.add_scalar('Generalized dice loss/test', val_score, global_step)
+                    # Log metrics to Terminal and TensorBoard
+                    logging.info(f"Validation Loss: {val_score:.4f}")
+                    
+                    if n_classes == 1:
+                        logging.info(f"Accuracy:  {val_metrics['accuracy']:.4f}")
+                        logging.info(f"Precision: {val_metrics['precision']:.4f}")
+                        logging.info(f"Recall:    {val_metrics['recall']:.4f}")
+                        logging.info(f"IoU:       {val_metrics['iou']:.4f}")
+                        
+                        writer.add_scalar('Dice loss/test', val_score, global_step)
+                        writer.add_scalar('Accuracy/test', val_metrics['accuracy'], global_step)
+                        writer.add_scalar('Precision/test', val_metrics['precision'], global_step)
+                        writer.add_scalar('Recall/test', val_metrics['recall'], global_step)
+                        writer.add_scalar('IoU/test', val_metrics['iou'], global_step)
                     else:
-                        logging.info('Validation loss: {}'.format(val_score))
-                        writer.add_scalar('Dice loss/train', epoch_score, global_step)
-                        writer.add_scalar('Dice loss/test', val_score, global_step)       
-        scheduler.step()         
+                        writer.add_scalar('Generalized dice loss/test', val_score, global_step)
+
+        # scheduler.step() # Moved inside validation block for ReduceLROnPlateau
+        
         if save_cp:
             try:
                 os.mkdir(dir_checkpoint)
@@ -163,6 +190,8 @@ if __name__ == '__main__':
         n_classes = 2
     elif args.dataset == 'Coronary':
         n_classes = 3
+    elif args.dataset == 'LeafDisease':
+        n_classes = 1 # Binary segmentation
 
     # Instantiate EfficientUNet++ with the specified encoder
     net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
@@ -173,7 +202,8 @@ if __name__ == '__main__':
         m.requires_grad_ = False
 
     # Distribute training over GPUs
-    net = nn.DataParallel(net)
+    if torch.cuda.device_count() > 1:
+        net = nn.DataParallel(net)
 
     # Load weights from file
     if args.load:
@@ -183,8 +213,6 @@ if __name__ == '__main__':
         logging.info(f'Model loaded from {args.load}')
 
     net.to(device=device)
-    # Faster convolutions, but more memory usage
-    #cudnn.benchmark = True
 
     # Instantiate datasets
     if args.dataset == 'DRIVE':
@@ -193,14 +221,26 @@ if __name__ == '__main__':
             augmentation_ratio = args.augmentation_ratio, crop_size=512)
         validation_set = RetinaSegmentationDataset(args.val_img_dir if args.val_img_dir is not None else 'DRIVE/validation/images/', 
             args.val_mask_dir if args.val_mask_dir is not None else 'DRIVE/validation/1st_manual/', args.scale)
-        dataset_class = RetinaSegmentationDataset
     elif args.dataset == 'Coronary':
         training_set = CoronaryArterySegmentationDataset(args.train_img_dir if args.train_img_dir is not None else 'Coronary/train/imgs/', 
             args.train_mask_dir if args.train_mask_dir is not None else 'Coronary/train/masks/', args.scale, 
             augmentation_ratio = args.augmentation_ratio, crop_size=512)
         validation_set = CoronaryArterySegmentationDataset(args.val_img_dir if args.val_img_dir is not None else 'Coronary/val/imgs/', 
             args.val_mask_dir if args.val_mask_dir is not None else 'Coronary/val/masks/', args.scale, mask_suffix='a')
-        dataset_class = RetinaSegmentationDataset
+    elif args.dataset == 'LeafDisease':
+        # CHANGED: Generic dataset loader for custom binary data
+        training_set = BasicSegmentationDataset(
+            imgs_dir=args.train_img_dir, 
+            masks_dir=args.train_mask_dir, 
+            scale=args.scale,
+            mask_suffix='' # Assumes mask has same filename as image. Change to '_mask' etc if needed.
+        )
+        validation_set = BasicSegmentationDataset(
+            imgs_dir=args.val_img_dir, 
+            masks_dir=args.val_mask_dir, 
+            scale=args.scale,
+            mask_suffix=''
+        )
     else:
         print("Invalid dataset")
         exit()
