@@ -38,18 +38,19 @@ def train_net(net,
     n_train = len(train)
     n_val = len(val)
     
-    # CHANGED: Reduced num_workers to 2
+    # Reduced num_workers to 2 for Windows compatibility
     train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
-    batch_size = (1 + augmentation_ratio)*batch_size
+    # Effective batch size with augmentation
+    batch_size_effective = (1 + augmentation_ratio) * batch_size
 
-    writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
+    writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size_effective}_SCALE_{img_scale}')
     global_step = 0
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
-        Batch size:      {batch_size}
+        Batch size:      {batch_size} (Effective: {batch_size_effective})
         Learning rate:   {lr}
         Training size:   {n_train}
         Validation size: {n_val}
@@ -58,15 +59,16 @@ def train_net(net,
         Images scaling:  {img_scale}
         Augmentation ratio: {augmentation_ratio}
         Classes:         {n_classes}
+        Encoder:         Unfrozen (Training all layers)
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=lr)
-    # CHANGED: Use ReduceLROnPlateau
+    # Use ReduceLROnPlateau to lower LR when validation loss stops improving
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
 
     best_val_loss = float('inf')
 
-    # CHANGED: Initialize history dictionary for Excel and Plotting
+    # Initialize history dictionary for Excel and Plotting
     history = {
         'epoch': [],
         'learning_rate': [],
@@ -80,7 +82,7 @@ def train_net(net,
 
     if save_cp:
         try:
-            os.mkdir(dir_checkpoint)
+            os.makedirs(dir_checkpoint, exist_ok=True)
             logging.info('Created checkpoint directory')
         except OSError:
             pass
@@ -132,12 +134,13 @@ def train_net(net,
         val_metrics = eval_net(net, val_loader, device, n_classes)
         val_score = val_metrics['loss']
         
-        # 2. Training Metrics (Calculating full metrics on training set)
-        # Note: This increases training time but is required for the requested Excel log.
-        logging.info("Calculating detailed training metrics...")
+        # 2. Training Metrics 
+        # (Evaluating on training set to get the graph points you requested)
+        logging.info("Calculating training metrics (this may take a moment)...")
+        # We temporarily switch to eval mode for metric calculation to be accurate
         train_metrics_full = eval_net(net, train_loader, device, n_classes)
         
-        # Scheduler step
+        # Scheduler step based on validation loss
         scheduler.step(val_score)
 
         # 3. Log to History
@@ -145,20 +148,19 @@ def train_net(net,
         history['epoch'].append(epoch + 1)
         history['learning_rate'].append(current_lr)
         
-        # Losses
-        # Use the running loss for training curve (more typical)
+        # Calculate average training loss for the epoch
         avg_train_loss = epoch_loss / (n_train // (batch_size / (1 + augmentation_ratio)))
         history['train_loss'].append(avg_train_loss) 
         history['val_loss'].append(val_score)
 
-        # Helper to safely extract metrics (calculates Dice from F1 if missing)
+        # Helper to safely extract metrics
         def extract_metrics(metric_dict, prefix, hist_dict):
             hist_dict[f'{prefix}_acc'].append(metric_dict.get('accuracy', 0))
             hist_dict[f'{prefix}_prec'].append(metric_dict.get('precision', 0))
             hist_dict[f'{prefix}_rec'].append(metric_dict.get('recall', 0))
             hist_dict[f'{prefix}_iou'].append(metric_dict.get('iou', 0))
             
-            # Calculate Dice if not explicitly provided (Dice = F1 Score)
+            # Use dice if available, else calculate F1
             if 'dice' in metric_dict:
                 hist_dict[f'{prefix}_dice'].append(metric_dict['dice'])
             else:
@@ -170,25 +172,26 @@ def train_net(net,
         extract_metrics(train_metrics_full, 'train', history)
         extract_metrics(val_metrics, 'val', history)
 
-        logging.info(f"Validation Loss: {val_score:.4f} | Train Loss: {avg_train_loss:.4f}")
+        logging.info(f"Epoch {epoch+1} Results:")
+        logging.info(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {val_score:.4f}")
+        logging.info(f"  Train IoU:  {train_metrics_full.get('iou',0):.4f} | Val IoU:  {val_metrics.get('iou',0):.4f}")
 
         # Tensorboard
         writer.add_scalar('learning_rate', current_lr, global_step)
-        writer.add_scalar('Dice loss/test', val_score, global_step) # Assuming loss includes dice
-        if 'accuracy' in val_metrics:
-            writer.add_scalar('Accuracy/test', val_metrics['accuracy'], global_step)
+        writer.add_scalar('Loss/test', val_score, global_step)
+        if 'iou' in val_metrics:
             writer.add_scalar('IoU/test', val_metrics['iou'], global_step)
 
         # Save Best Checkpoint
         if save_cp and val_score < best_val_loss:
             best_val_loss = val_score
-            torch.save(net.state_dict(), dir_checkpoint + 'CP_best.pth')
+            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_best.pth'))
             logging.info(f'New best checkpoint saved! Loss: {best_val_loss:.4f}')
 
         # Save Last Checkpoint
         if save_cp:
-            torch.save(net.state_dict(), dir_checkpoint + 'CP_last.pth')
-            logging.info(f'Last checkpoint (epoch {epoch + 1}) saved !')
+            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_last.pth'))
+            logging.info(f'Last checkpoint saved.')
 
     writer.close()
 
@@ -220,10 +223,10 @@ def train_net(net,
         plt.title('Learning Rate over Epochs')
         plt.xlabel('Epoch')
         plt.ylabel('LR')
-        plt.yscale('log') # Log scale often better for LR
+        plt.yscale('log')
         plt.grid(True)
 
-        # Plot 3: Validation Dice
+        # Plot 3: Dice Coefficient
         plt.subplot(1, 3, 3)
         plt.plot(history['epoch'], history['val_dice'], label='Val Dice', color='red')
         plt.plot(history['epoch'], history['train_dice'], label='Train Dice', color='pink', linestyle='--')
@@ -249,7 +252,8 @@ def get_args():
     parser.add_argument('-vm', '--validation-masks-dir', type=str, default=None, help='Validation masks directory', dest='val_mask_dir')
     parser.add_argument('-enc', '--encoder', metavar='ENC', type=str, default='timm-efficientnet-b0', help='Encoder to be used', dest='encoder')
     parser.add_argument('-e', '--epochs', metavar='E', type=int, default=150, help='Number of epochs', dest='epochs')
-    parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=1, help='Batch size', dest='batchsize')
+    # CHANGED: Default batch size set to 2
+    parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=2, help='Batch size', dest='batchsize')
     parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.001, help='Learning rate', dest='lr')
     parser.add_argument('-f', '--load', type=str, default=False, help='Load model from a .pth file', dest='load')
     parser.add_argument('-s', '--scale', metavar='S', type=float, default=1, help='Downscaling factor of the images', dest='scale')
@@ -271,11 +275,14 @@ if __name__ == '__main__':
     elif args.dataset == 'LeafDisease':
         n_classes = 1 
 
+    # Instantiate EfficientUNet++
     net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
 
-    net.encoder.eval()
-    for m in net.encoder.modules():
-        m.requires_grad_ = False
+    # --- UNFREEZING STEPS ---
+    # We simply do NOT call net.encoder.eval() or set requires_grad=False.
+    # We ensure the network is in training mode.
+    net.train()
+    # ------------------------
 
     if torch.cuda.device_count() > 1:
         net = nn.DataParallel(net)
@@ -288,6 +295,7 @@ if __name__ == '__main__':
 
     net.to(device=device)
 
+    # Instantiate datasets
     if args.dataset == 'DRIVE':
         training_set = RetinaSegmentationDataset(args.train_img_dir if args.train_img_dir is not None else 'DRIVE/training/images/', 
             args.train_mask_dir if args.train_mask_dir is not None else 'DRIVE/training/1st_manual/', args.scale, 
