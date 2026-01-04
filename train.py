@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader
 from kornia.losses import focal_loss
 
 import segmentation_models_pytorch.segmentation_models_pytorch as smp
+import pandas as pd
+import matplotlib.pyplot as plt
 
 def train_net(net,
               device,
@@ -36,14 +38,12 @@ def train_net(net,
     n_train = len(train)
     n_val = len(val)
     
-    # CHANGED: Reduced num_workers to 2 to prevent Windows "BrokenPipeError"
+    # CHANGED: Reduced num_workers to 2
     train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
-    # Sets the effective batch size according to the batch size and the data augmentation ratio
     batch_size = (1 + augmentation_ratio)*batch_size
 
-    # Prepares the summary file
     writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size}_SCALE_{img_scale}')
     global_step = 0
 
@@ -60,13 +60,31 @@ def train_net(net,
         Classes:         {n_classes}
     ''')
 
-    # Choose the optimizer and scheduler 
     optimizer = optim.Adam(net.parameters(), lr=lr)
-    # scheduler = optim.lr_scheduler.StepLR(optimizer, epochs//3, gamma=0.1, verbose=True)
-    # CHANGED: Switched to ReduceLROnPlateau to adapt to validation loss
+    # CHANGED: Use ReduceLROnPlateau
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
 
-    # Train loop
+    best_val_loss = float('inf')
+
+    # CHANGED: Initialize history dictionary for Excel and Plotting
+    history = {
+        'epoch': [],
+        'learning_rate': [],
+        'train_loss': [],
+        'val_loss': [],
+        # Training metrics
+        'train_acc': [], 'train_prec': [], 'train_rec': [], 'train_iou': [], 'train_dice': [],
+        # Validation metrics
+        'val_acc': [], 'val_prec': [], 'val_rec': [], 'val_iou': [], 'val_dice': []
+    }
+
+    if save_cp:
+        try:
+            os.mkdir(dir_checkpoint)
+            logging.info('Created checkpoint directory')
+        except OSError:
+            pass
+
     for epoch in range(epochs):
         net.train()
         epoch_loss = 0
@@ -75,14 +93,12 @@ def train_net(net,
                 imgs = batch['image']
                 true_masks = batch['mask']
                 
-                # Concatenate the lists inside the DataLoaders
                 imgs = torch.cat(imgs, dim = 0)
                 true_masks = torch.cat(true_masks, dim = 0)
 
                 assert imgs.shape[1] == n_channels, \
                     f'Network has been defined with {n_channels} input channels, ' \
-                    f'but loaded images have {imgs.shape[1]} channels. Please check that ' \
-                    'the images are loaded correctly.'
+                    f'but loaded images have {imgs.shape[1]} channels.'
 
                 imgs = imgs.to(device=device, dtype=torch.float32)
                 mask_type = torch.float32 if n_classes == 1 else torch.long
@@ -90,14 +106,9 @@ def train_net(net,
 
                 masks_pred = net(imgs)                         
                 
-                # Compute loss
                 if n_classes == 1:
-                    # Binary Focal Loss
-                    # loss = focal_loss(masks_pred, true_masks, alpha=0.25, gamma=2, reduction='mean')
                     bce_loss = nn.BCEWithLogitsLoss()
                     loss = bce_loss(masks_pred, true_masks)
-                    # loss += dice_loss(masks_pred, true_masks, multiclass=False)
-                    # Fix: Ensure dice_loss is a scalar (0-d) by taking the mean or squeezing
                     loss += dice_loss(masks_pred, true_masks).mean()
                 else:
                     loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
@@ -114,55 +125,120 @@ def train_net(net,
 
                 pbar.update(imgs.shape[0]//(1 + augmentation_ratio))
                 global_step += 1
-                
-                # Validation Step
-                if global_step % (n_train // (batch_size / (1 + augmentation_ratio))) == 0:
-                    for tag, value in net.named_parameters():
-                        tag = tag.replace('.', '/')
-                        try:
-                            writer.add_histogram('weights/' + tag, value.data.cpu().numpy(), global_step)
-                            writer.add_histogram('grads/' + tag, value.grad.data.cpu().numpy(), global_step)
-                        except:
-                            pass
-                    
-                    # CHANGED: Handle dictionary return from updated eval_net
-                    val_metrics = eval_net(net, val_loader, device, n_classes)
-                    
-                    # Extract loss for scheduler
-                    val_score = val_metrics['loss']
-                    scheduler.step(val_score)
 
-                    writer.add_scalar('learning_rate', optimizer.param_groups[0]['lr'], global_step)
-
-                    # Log metrics to Terminal and TensorBoard
-                    logging.info(f"Validation Loss: {val_score:.4f}")
-                    
-                    if n_classes == 1:
-                        logging.info(f"Accuracy:  {val_metrics['accuracy']:.4f}")
-                        logging.info(f"Precision: {val_metrics['precision']:.4f}")
-                        logging.info(f"Recall:    {val_metrics['recall']:.4f}")
-                        logging.info(f"IoU:       {val_metrics['iou']:.4f}")
-                        
-                        writer.add_scalar('Dice loss/test', val_score, global_step)
-                        writer.add_scalar('Accuracy/test', val_metrics['accuracy'], global_step)
-                        writer.add_scalar('Precision/test', val_metrics['precision'], global_step)
-                        writer.add_scalar('Recall/test', val_metrics['recall'], global_step)
-                        writer.add_scalar('IoU/test', val_metrics['iou'], global_step)
-                    else:
-                        writer.add_scalar('Generalized dice loss/test', val_score, global_step)
-
-        # scheduler.step() # Moved inside validation block for ReduceLROnPlateau
+        # --- End of Epoch Evaluation ---
         
+        # 1. Validation Metrics
+        val_metrics = eval_net(net, val_loader, device, n_classes)
+        val_score = val_metrics['loss']
+        
+        # 2. Training Metrics (Calculating full metrics on training set)
+        # Note: This increases training time but is required for the requested Excel log.
+        logging.info("Calculating detailed training metrics...")
+        train_metrics_full = eval_net(net, train_loader, device, n_classes)
+        
+        # Scheduler step
+        scheduler.step(val_score)
+
+        # 3. Log to History
+        current_lr = optimizer.param_groups[0]['lr']
+        history['epoch'].append(epoch + 1)
+        history['learning_rate'].append(current_lr)
+        
+        # Losses
+        # Use the running loss for training curve (more typical)
+        avg_train_loss = epoch_loss / (n_train // (batch_size / (1 + augmentation_ratio)))
+        history['train_loss'].append(avg_train_loss) 
+        history['val_loss'].append(val_score)
+
+        # Helper to safely extract metrics (calculates Dice from F1 if missing)
+        def extract_metrics(metric_dict, prefix, hist_dict):
+            hist_dict[f'{prefix}_acc'].append(metric_dict.get('accuracy', 0))
+            hist_dict[f'{prefix}_prec'].append(metric_dict.get('precision', 0))
+            hist_dict[f'{prefix}_rec'].append(metric_dict.get('recall', 0))
+            hist_dict[f'{prefix}_iou'].append(metric_dict.get('iou', 0))
+            
+            # Calculate Dice if not explicitly provided (Dice = F1 Score)
+            if 'dice' in metric_dict:
+                hist_dict[f'{prefix}_dice'].append(metric_dict['dice'])
+            else:
+                p = metric_dict.get('precision', 0)
+                r = metric_dict.get('recall', 0)
+                dice = 2 * p * r / (p + r + 1e-8)
+                hist_dict[f'{prefix}_dice'].append(dice)
+
+        extract_metrics(train_metrics_full, 'train', history)
+        extract_metrics(val_metrics, 'val', history)
+
+        logging.info(f"Validation Loss: {val_score:.4f} | Train Loss: {avg_train_loss:.4f}")
+
+        # Tensorboard
+        writer.add_scalar('learning_rate', current_lr, global_step)
+        writer.add_scalar('Dice loss/test', val_score, global_step) # Assuming loss includes dice
+        if 'accuracy' in val_metrics:
+            writer.add_scalar('Accuracy/test', val_metrics['accuracy'], global_step)
+            writer.add_scalar('IoU/test', val_metrics['iou'], global_step)
+
+        # Save Best Checkpoint
+        if save_cp and val_score < best_val_loss:
+            best_val_loss = val_score
+            torch.save(net.state_dict(), dir_checkpoint + 'CP_best.pth')
+            logging.info(f'New best checkpoint saved! Loss: {best_val_loss:.4f}')
+
+        # Save Last Checkpoint
         if save_cp:
-            try:
-                os.mkdir(dir_checkpoint)
-                logging.info('Created checkpoint directory')
-            except OSError:
-                pass
-            torch.save(net.state_dict(),
-                       dir_checkpoint + f'CP_epoch{epoch + 1}.pth')
-            logging.info(f'Checkpoint {epoch + 1} saved !')
+            torch.save(net.state_dict(), dir_checkpoint + 'CP_last.pth')
+            logging.info(f'Last checkpoint (epoch {epoch + 1}) saved !')
+
     writer.close()
+
+    # --- Post-Training: Save Excel and Plots ---
+    
+    # 1. Save Excel
+    df = pd.DataFrame(history)
+    excel_path = os.path.join(dir_checkpoint, 'training_metrics.xlsx')
+    df.to_excel(excel_path, index=False)
+    logging.info(f'Metrics saved to {excel_path}')
+
+    # 2. Plotting
+    try:
+        plt.figure(figsize=(18, 5))
+        
+        # Plot 1: Training Loss
+        plt.subplot(1, 3, 1)
+        plt.plot(history['epoch'], history['train_loss'], label='Train Loss', color='blue')
+        plt.plot(history['epoch'], history['val_loss'], label='Val Loss', color='orange', linestyle='--')
+        plt.title('Loss over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.grid(True)
+
+        # Plot 2: Learning Rate
+        plt.subplot(1, 3, 2)
+        plt.plot(history['epoch'], history['learning_rate'], label='Learning Rate', color='green')
+        plt.title('Learning Rate over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('LR')
+        plt.yscale('log') # Log scale often better for LR
+        plt.grid(True)
+
+        # Plot 3: Validation Dice
+        plt.subplot(1, 3, 3)
+        plt.plot(history['epoch'], history['val_dice'], label='Val Dice', color='red')
+        plt.plot(history['epoch'], history['train_dice'], label='Train Dice', color='pink', linestyle='--')
+        plt.title('Dice Coefficient over Epochs')
+        plt.xlabel('Epoch')
+        plt.ylabel('Dice Coeff')
+        plt.legend()
+        plt.grid(True)
+
+        plot_path = os.path.join(dir_checkpoint, 'training_plot.jpg')
+        plt.savefig(plot_path)
+        plt.close()
+        logging.info(f'Training plot saved to {plot_path}')
+    except Exception as e:
+        logging.error(f"Failed to save plots: {e}")
 
 def get_args():
     parser = argparse.ArgumentParser(description='EfficientUNet++ train script', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -185,31 +261,25 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     args = get_args()
 
-    # Determine device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 
-    # Number of classes
     if args.dataset == 'DRIVE':
         n_classes = 2
     elif args.dataset == 'Coronary':
         n_classes = 3
     elif args.dataset == 'LeafDisease':
-        n_classes = 1 # Binary segmentation
+        n_classes = 1 
 
-    # Instantiate EfficientUNet++ with the specified encoder
     net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
 
-    # Freeze encoder weights
     net.encoder.eval()
     for m in net.encoder.modules():
         m.requires_grad_ = False
 
-    # Distribute training over GPUs
     if torch.cuda.device_count() > 1:
         net = nn.DataParallel(net)
 
-    # Load weights from file
     if args.load:
         net.load_state_dict(
             torch.load(args.load, map_location=device)
@@ -218,7 +288,6 @@ if __name__ == '__main__':
 
     net.to(device=device)
 
-    # Instantiate datasets
     if args.dataset == 'DRIVE':
         training_set = RetinaSegmentationDataset(args.train_img_dir if args.train_img_dir is not None else 'DRIVE/training/images/', 
             args.train_mask_dir if args.train_mask_dir is not None else 'DRIVE/training/1st_manual/', args.scale, 
@@ -232,12 +301,11 @@ if __name__ == '__main__':
         validation_set = CoronaryArterySegmentationDataset(args.val_img_dir if args.val_img_dir is not None else 'Coronary/val/imgs/', 
             args.val_mask_dir if args.val_mask_dir is not None else 'Coronary/val/masks/', args.scale, mask_suffix='a')
     elif args.dataset == 'LeafDisease':
-        # CHANGED: Generic dataset loader for custom binary data
         training_set = BasicSegmentationDataset(
             imgs_dir=args.train_img_dir, 
             masks_dir=args.train_mask_dir, 
             scale=args.scale,
-            mask_suffix='' # Assumes mask has same filename as image. Change to '_mask' etc if needed.
+            mask_suffix='' 
         )
         validation_set = BasicSegmentationDataset(
             imgs_dir=args.val_img_dir, 
