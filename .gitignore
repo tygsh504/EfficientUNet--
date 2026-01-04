@@ -1,1 +1,5 @@
 /venv
+/LeafDisease
+/checkpoints
+/__pycache__
+/runs

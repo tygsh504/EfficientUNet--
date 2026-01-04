@@ -46,19 +46,49 @@ class BasicSegmentationDataset(Dataset):
         """
         return len(self.ids)
 
+    # @classmethod
+    # def preprocess(cls, pil_img: Image, scale: float) -> Image:
+    #     r"""
+    #     Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
+    #     the CHW format.
+
+    #     Args:
+    #         pil_imgs (Image): object of class `Image` to be preprocessed.
+    #         scale (float): image scale, between 0 and 1.
+    #     """
+    #     w, h = pil_img.size
+    #     newW, newH = int(scale * w), int(scale * h)
+    #     assert newW > 0 and newH > 0, 'Scale is too small'
+    #     pil_img = pil_img.resize((newW, newH))
+
+    #     img_nd = np.array(pil_img)
+
+    #     if len(img_nd.shape) == 2:
+    #         img_nd = np.expand_dims(img_nd, axis=2)
+
+    #     # HWC to CHW
+    #     img_trans = img_nd.transpose((2, 0, 1))
+    #     if img_trans.max() > 1:
+    #         img_trans = img_trans / 255
+
+    #     return img_trans
     @classmethod
     def preprocess(cls, pil_img: Image, scale: float) -> Image:
         r"""
         Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
         the CHW format.
-
-        Args:
-            pil_imgs (Image): object of class `Image` to be preprocessed.
-            scale (float): image scale, between 0 and 1.
         """
         w, h = pil_img.size
         newW, newH = int(scale * w), int(scale * h)
-        assert newW > 0 and newH > 0, 'Scale is too small'
+        
+        # FIX: Force dimensions to be multiples of 32 to prevent feature map size mismatch in U-Net
+        newW = int(round(newW / 32) * 32)
+        newH = int(round(newH / 32) * 32)
+        
+        # Safety check to prevent 0x0 images
+        if newW < 32: newW = 32
+        if newH < 32: newH = 32
+        
         pil_img = pil_img.resize((newW, newH))
 
         img_nd = np.array(pil_img)

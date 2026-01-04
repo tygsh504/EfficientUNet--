@@ -3,31 +3,13 @@ import torch.nn as nn
 
 from timm.models.efficientnet import EfficientNet
 from timm.models.efficientnet import decode_arch_def, round_channels, default_cfgs
-from timm.models.layers.activations import Swish
+from torch.nn import SiLU as Swish  # Use PyTorch's native Swish/SiLU for compatibility
 
 from ._base import EncoderMixin
 
 
 def get_efficientnet_kwargs(channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
-    """Creates an EfficientNet model.
-    Ref impl: https://github.com/tensorflow/tpu/blob/master/models/official/efficientnet/efficientnet_model.py
-    Paper: https://arxiv.org/abs/1905.11946
-    EfficientNet params
-    name: (channel_multiplier, depth_multiplier, resolution, dropout_rate)
-    'efficientnet-b0': (1.0, 1.0, 224, 0.2),
-    'efficientnet-b1': (1.0, 1.1, 240, 0.2),
-    'efficientnet-b2': (1.1, 1.2, 260, 0.3),
-    'efficientnet-b3': (1.2, 1.4, 300, 0.3),
-    'efficientnet-b4': (1.4, 1.8, 380, 0.4),
-    'efficientnet-b5': (1.6, 2.2, 456, 0.4),
-    'efficientnet-b6': (1.8, 2.6, 528, 0.5),
-    'efficientnet-b7': (2.0, 3.1, 600, 0.5),
-    'efficientnet-b8': (2.2, 3.6, 672, 0.5),
-    'efficientnet-l2': (4.3, 5.3, 800, 0.5),
-    Args:
-      channel_multiplier: multiplier to number of channels per layer
-      depth_multiplier: multiplier to number of repeats per stage
-    """
+    """Creates an EfficientNet model."""
     arch_def = [
         ['ds_r1_k3_s1_e1_c16_se0.25'],
         ['ir_r2_k3_s2_e6_c24_se0.25'],
@@ -43,30 +25,15 @@ def get_efficientnet_kwargs(channel_multiplier=1.0, depth_multiplier=1.0, drop_r
         stem_size=32,
         channel_multiplier=channel_multiplier,
         act_layer=Swish,
-        norm_kwargs={},  # TODO: check
+        norm_kwargs={},
         drop_rate=drop_rate,
         drop_path_rate=0.2,
     )
     return model_kwargs
 
+
 def gen_efficientnet_lite_kwargs(channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
-    """Creates an EfficientNet-Lite model.
-
-    Ref impl: https://github.com/tensorflow/tpu/tree/master/models/official/efficientnet/lite
-    Paper: https://arxiv.org/abs/1905.11946
-
-    EfficientNet params
-    name: (channel_multiplier, depth_multiplier, resolution, dropout_rate)
-      'efficientnet-lite0': (1.0, 1.0, 224, 0.2),
-      'efficientnet-lite1': (1.0, 1.1, 240, 0.2),
-      'efficientnet-lite2': (1.1, 1.2, 260, 0.3),
-      'efficientnet-lite3': (1.2, 1.4, 280, 0.3),
-      'efficientnet-lite4': (1.4, 1.8, 300, 0.3),
-
-    Args:
-      channel_multiplier: multiplier to number of channels per layer
-      depth_multiplier: multiplier to number of repeats per stage
-    """
+    """Creates an EfficientNet-Lite model."""
     arch_def = [
         ['ds_r1_k3_s1_e1_c16'],
         ['ir_r2_k3_s2_e6_c24'],
@@ -89,9 +56,13 @@ def gen_efficientnet_lite_kwargs(channel_multiplier=1.0, depth_multiplier=1.0, d
     )
     return model_kwargs
 
-class EfficientNetBaseEncoder(EfficientNet, EncoderMixin):
 
+class EfficientNetBaseEncoder(EfficientNet, EncoderMixin):
     def __init__(self, stage_idxs, out_channels, depth=5, **kwargs):
+        # Fix: Remove arguments that newer timm versions don't accept
+        kwargs.pop('channel_multiplier', None)
+        kwargs.pop('norm_kwargs', None)
+
         super().__init__(**kwargs)
 
         self._stage_idxs = stage_idxs
@@ -99,6 +70,7 @@ class EfficientNetBaseEncoder(EfficientNet, EncoderMixin):
         self._depth = depth
         self._in_channels = 3
 
+        # We delete the classifier because we don't need it for segmentation
         del self.classifier
 
     def get_stages(self):
@@ -122,30 +94,51 @@ class EfficientNetBaseEncoder(EfficientNet, EncoderMixin):
         return features
 
     def load_state_dict(self, state_dict, **kwargs):
-        state_dict.pop("classifier.bias")
-        state_dict.pop("classifier.weight")
+        state_dict.pop("classifier.bias", None)
+        state_dict.pop("classifier.weight", None)
         super().load_state_dict(state_dict, **kwargs)
 
 
 class EfficientNetEncoder(EfficientNetBaseEncoder):
-
     def __init__(self, stage_idxs, out_channels, depth=5, channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
         kwargs = get_efficientnet_kwargs(channel_multiplier, depth_multiplier, drop_rate)
         super().__init__(stage_idxs, out_channels, depth, **kwargs)
 
 
 class EfficientNetLiteEncoder(EfficientNetBaseEncoder):
-
     def __init__(self, stage_idxs, out_channels, depth=5, channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
         kwargs = gen_efficientnet_lite_kwargs(channel_multiplier, depth_multiplier, drop_rate)
         super().__init__(stage_idxs, out_channels, depth, **kwargs)
 
 
 def prepare_settings(settings):
+    # 1. Try to unwrap 'DefaultCfg' (new timm), but catch crashes
+    try:
+        if hasattr(settings, 'default'):
+            settings = settings.default
+    except (IndexError, AttributeError):
+        pass
+
+    # 2. Extract values safely
+    if isinstance(settings, dict):
+        mean = settings.get('mean')
+        std = settings.get('std')
+        url = settings.get('url')
+    else:
+        mean = getattr(settings, 'mean', None)
+        std = getattr(settings, 'std', None)
+        url = getattr(settings, 'url', None)
+
+        if mean is None and hasattr(settings, 'input_mean'): mean = settings.input_mean
+        if std is None and hasattr(settings, 'input_std'): std = settings.input_std
+
+    if mean is None: mean = [0.485, 0.456, 0.406]
+    if std is None: std = [0.229, 0.224, 0.225]
+
     return {
-        "mean": settings["mean"],
-        "std": settings["std"],
-        "url": settings["url"],
+        "mean": mean,
+        "std": std,
+        "url": url,
         "input_range": (0, 1),
         "input_space": "RGB",
     }

@@ -93,8 +93,12 @@ def train_net(net,
                 # Compute loss
                 if n_classes == 1:
                     # Binary Focal Loss
-                    loss = focal_loss(masks_pred, true_masks, alpha=0.25, gamma=2, reduction='mean')
-                    loss += dice_loss(masks_pred, true_masks, multiclass=False)
+                    # loss = focal_loss(masks_pred, true_masks, alpha=0.25, gamma=2, reduction='mean')
+                    bce_loss = nn.BCEWithLogitsLoss()
+                    loss = bce_loss(masks_pred, true_masks)
+                    # loss += dice_loss(masks_pred, true_masks, multiclass=False)
+                    # Fix: Ensure dice_loss is a scalar (0-d) by taking the mean or squeezing
+                    loss += dice_loss(masks_pred, true_masks).mean()
                 else:
                     loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
                     loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
