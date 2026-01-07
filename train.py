@@ -6,6 +6,7 @@ import sys
 import torch
 import torch.nn as nn
 from torch import optim
+from torch.cuda.amp import GradScaler, autocast # Added for AMP
 from tqdm import tqdm
 from metrics import dice_loss
 from eval import eval_net
@@ -60,13 +61,16 @@ def train_net(net,
         Augmentation ratio: {augmentation_ratio}
         Classes:         {n_classes}
         Encoder:         Unfrozen (Training all layers)
+        Mixed Precision: Enabled
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=lr)
     # Use ReduceLROnPlateau to lower LR when validation loss stops improving
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
     best_val_loss = float('inf')
+
+    # Initialize GradScaler for AMP
+    scaler = GradScaler()
 
     # Initialize history dictionary for Excel and Plotting
     history = {
@@ -106,24 +110,38 @@ def train_net(net,
                 mask_type = torch.float32 if n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
 
-                masks_pred = net(imgs)                         
-                
-                if n_classes == 1:
-                    bce_loss = nn.BCEWithLogitsLoss()
-                    loss = bce_loss(masks_pred, true_masks)
-                    loss += dice_loss(masks_pred, true_masks).mean()
-                else:
-                    loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
-                    loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
+                optimizer.zero_grad()
+
+                # Runs the forward pass with autocasting.
+                with autocast():
+                    masks_pred = net(imgs)                         
+                    
+                    if n_classes == 1:
+                        bce_loss = nn.BCEWithLogitsLoss()
+                        loss = bce_loss(masks_pred, true_masks)
+                        loss += dice_loss(masks_pred, true_masks).mean()
+                    else:
+                        loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
+                        loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
 
                 epoch_loss += loss.item()
                 writer.add_scalar('Loss/train', loss.item(), global_step)
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
-                optimizer.zero_grad()
-                loss.backward()
+                # Scales loss. Calls backward() on scaled loss to create scaled gradients.
+                scaler.scale(loss).backward()
+
+                # Unscales the gradients of optimizer's assigned params in-place
+                scaler.unscale_(optimizer)
+
+                # Since the gradients of optimizer's assigned params are unscaled, clips as usual.
                 nn.utils.clip_grad_value_(net.parameters(), 0.1)
-                optimizer.step()
+
+                # optimizer.step() is replaced by scaler.step(optimizer)
+                scaler.step(optimizer)
+
+                # Updates the scale for next iteration.
+                scaler.update()
 
                 pbar.update(imgs.shape[0]//(1 + augmentation_ratio))
                 global_step += 1
