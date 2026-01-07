@@ -1,5 +1,6 @@
 from os.path import splitext
 from os import listdir
+import os
 from typing import Dict, List
 import numpy as np
 from glob import glob
@@ -46,37 +47,15 @@ class BasicSegmentationDataset(Dataset):
         """
         return len(self.ids)
 
-    # @classmethod
-    # def preprocess(cls, pil_img: Image, scale: float) -> Image:
-    #     r"""
-    #     Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
-    #     the CHW format.
-
-    #     Args:
-    #         pil_imgs (Image): object of class `Image` to be preprocessed.
-    #         scale (float): image scale, between 0 and 1.
-    #     """
-    #     w, h = pil_img.size
-    #     newW, newH = int(scale * w), int(scale * h)
-    #     assert newW > 0 and newH > 0, 'Scale is too small'
-    #     pil_img = pil_img.resize((newW, newH))
-
-    #     img_nd = np.array(pil_img)
-
-    #     if len(img_nd.shape) == 2:
-    #         img_nd = np.expand_dims(img_nd, axis=2)
-
-    #     # HWC to CHW
-    #     img_trans = img_nd.transpose((2, 0, 1))
-    #     if img_trans.max() > 1:
-    #         img_trans = img_trans / 255
-
-    #     return img_trans
     @classmethod
     def preprocess(cls, pil_img: Image, scale: float) -> Image:
         r"""
         Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
         the CHW format.
+
+        Args:
+            pil_imgs (Image): object of class `Image` to be preprocessed.
+            scale (float): image scale, between 0 and 1.
         """
         w, h = pil_img.size
         newW, newH = int(scale * w), int(scale * h)
@@ -108,16 +87,26 @@ class BasicSegmentationDataset(Dataset):
         Returns two tensors: an image and the corresponding mask. 
         """
         idx = self.ids[i]
-        mask_file = glob(self.masks_dir + idx + self.mask_suffix + '.*')
-        img_file = glob(self.imgs_dir + idx + '.*')
+        
+        # Safe path construction
+        mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+        img_glob = os.path.join(self.imgs_dir, idx + '.*')
+        
+        mask_file = glob(mask_glob)
+        img_file = glob(img_glob)
 
         assert len(mask_file) == 1, \
-            f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
+            f'Either no mask or multiple masks found for the ID {idx}: {mask_file} (Searched: {mask_glob})'
         assert len(img_file) == 1, \
-            f'Either no image or multiple images found for the ID {idx}: {img_file}'
+            f'Either no image or multiple images found for the ID {idx}: {img_file} (Searched: {img_glob})'
         mask = Image.open(mask_file[0])
         img = Image.open(img_file[0])
         
+        # --- FIX: Ensure image is RGB (3 channels) ---
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        # ---------------------------------------------
+
         assert img.size == mask.size, \
             f'Image and mask {idx} should be the same size, but are {img.size} and {mask.size}'
 
@@ -297,8 +286,14 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
         Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
         """
         idx = self.ids[i]
-        mask_file = glob(self.masks_dir + idx.replace('training', 'manual1') + '.*')
-        img_file = glob(self.imgs_dir + idx + '.*')
+        
+        # --- FIXED: Use os.path.join ---
+        mask_glob = os.path.join(self.masks_dir, idx.replace('training', 'manual1') + '.*')
+        img_glob = os.path.join(self.imgs_dir, idx + '.*')
+
+        mask_file = glob(mask_glob)
+        img_file = glob(img_glob)
+        # -------------------------------
 
         assert len(mask_file) == 1, \
             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
@@ -306,6 +301,11 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
             f'Either no image or multiple images found for the ID {idx}: {img_file}'
         mask = Image.open(mask_file[0])
         image = Image.open(img_file[0])
+        
+        # --- FIX: Ensure image is RGB ---
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        # --------------------------------
         
         assert image.size == mask.size, \
             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
@@ -491,8 +491,14 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
         Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
         """
         idx = self.ids[i]
-        mask_file = glob(self.masks_dir + idx + self.mask_suffix + '.*')
-        img_file = glob(self.imgs_dir + idx + '.*')
+        
+        # --- FIXED: Use os.path.join ---
+        mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+        img_glob = os.path.join(self.imgs_dir, idx + '.*')
+
+        mask_file = glob(mask_glob)
+        img_file = glob(img_glob)
+        # -------------------------------
 
         assert len(mask_file) == 1, \
             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
@@ -503,6 +509,11 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
         if mask.mode != 'L':
             mask = mask.convert(mode='L')
         image = Image.open(img_file[0])
+        
+        # --- FIX: Ensure image is RGB ---
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        # --------------------------------
         
         assert image.size == mask.size, \
             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
