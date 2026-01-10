@@ -40,8 +40,8 @@ def train_net(net,
     n_val = len(val)
     
     # Reduced num_workers to 2 for Windows compatibility
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
     # Effective batch size with augmentation
     batch_size_effective = (1 + augmentation_ratio) * batch_size
