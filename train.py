@@ -66,7 +66,8 @@ def train_net(net,
 
     optimizer = optim.Adam(net.parameters(), lr=lr)
     # Use ReduceLROnPlateau to lower LR when validation loss stops improving
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
     best_val_loss = float('inf')
 
     # Initialize GradScaler for AMP
