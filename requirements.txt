@@ -1,10 +1,12 @@
-absl-py==0.13.0
+﻿absl-py==0.13.0
 cachetools==4.2.2
 certifi==2021.5.30
 chardet==4.0.0
 contourpy==1.1.1
 cycler==0.12.1
+docopt==0.6.2
 efficientnet_pytorch==0.6.3
+et_xmlfile==2.0.0
 fonttools==4.57.0
 google-auth==1.31.0
 google-auth-oauthlib==0.4.4
@@ -18,9 +20,11 @@ matplotlib==3.7.5
 munch==2.5.0
 numpy==1.20.3
 oauthlib==3.1.1
+openpyxl==3.1.5
 packaging==25.0
 pandas==2.0.3
 Pillow==8.2.0
+pipreqs==0.4.13
 pretrainedmodels==0.7.4
 protobuf==3.17.3
 pyasn1==0.4.8
@@ -35,6 +39,7 @@ six==1.16.0
 tensorboard==2.5.0
 tensorboard-data-server==0.6.1
 tensorboard-plugin-wit==1.8.0
+thop==0.1.1.post2209072238
 timm==0.3.2
 torch==1.8.1+cu111
 torchaudio==0.8.1
@@ -44,4 +49,5 @@ typing-extensions==3.10.0.0
 tzdata==2025.3
 urllib3==1.26.5
 Werkzeug==2.0.1
+yarg==0.1.10
 zipp==3.20.2
