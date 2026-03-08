@@ -295,8 +295,9 @@ if __name__ == '__main__':
         n_classes = 1 
 
     # Instantiate EfficientUNet++
-    net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
-
+    net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights=None, in_channels=3, classes=n_classes)
+    # net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights=None, in_channels=3, classes=n_classes)
+    
     # --- UNFREEZING STEPS ---
     # We simply do NOT call net.encoder.eval() or set requires_grad=False.
     # We ensure the network is in training mode.
