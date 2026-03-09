@@ -1,3 +1,4 @@
+import re
 import torch
 import torch.nn as nn
 
@@ -19,10 +20,24 @@ def get_efficientnet_kwargs(channel_multiplier=1.0, depth_multiplier=1.0, drop_r
         ['ir_r4_k5_s2_e6_c192_se0.25'],
         ['ir_r1_k3_s1_e6_c320_se0.25'],
     ]
+
+    # Manually scale channels in arch_def
+    scaled_arch_def = []
+    for block_strings in arch_def:
+        block_string = block_strings[0]
+        match = re.search(r'c(\d+)', block_string)
+        if match:
+            channels = int(match.group(1))
+            scaled_channels = round_channels(channels, channel_multiplier)
+            scaled_block_string = re.sub(r'c(\d+)', 'c{}'.format(scaled_channels), block_string)
+            scaled_arch_def.append([scaled_block_string])
+        else:
+            scaled_arch_def.append(block_strings)
+
     model_kwargs = dict(
-        block_args=decode_arch_def(arch_def, depth_multiplier),
+        block_args=decode_arch_def(scaled_arch_def, depth_multiplier),
         num_features=round_channels(1280, channel_multiplier, 8, None),
-        stem_size=32,
+        stem_size=round_channels(32, channel_multiplier),
         channel_multiplier=channel_multiplier,
         act_layer=Swish,
         norm_kwargs={},
@@ -103,7 +118,6 @@ class EfficientNetEncoder(EfficientNetBaseEncoder):
     def __init__(self, stage_idxs, out_channels, depth=5, channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
         kwargs = get_efficientnet_kwargs(channel_multiplier, depth_multiplier, drop_rate)
         super().__init__(stage_idxs, out_channels, depth, **kwargs)
-
 
 class EfficientNetLiteEncoder(EfficientNetBaseEncoder):
     def __init__(self, stage_idxs, out_channels, depth=5, channel_multiplier=1.0, depth_multiplier=1.0, drop_rate=0.2):
