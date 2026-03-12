@@ -72,8 +72,8 @@ def delete_matching_images(black_images_list, first_folder_path, second_folder_p
 
 if __name__ == "__main__":
     # --- SETUP YOUR FOLDER PATHS HERE ---
-    first_folder = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\EfficientUNet++\LeafDisease\val\imgs"   # Folder containing the images to check for black
-    second_folder = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\EfficientUNet++\LeafDisease\val\imgs" # Folder containing original images to remove
+    first_folder = r"C:\Users\User\Desktop\EfficientUNet--\LeafDisease\train\masks"   # Folder containing the images to check for black
+    second_folder = r"C:\Users\User\Desktop\EfficientUNet--\LeafDisease\train\imgs" # Folder containing original images to remove
     
     # Run the detection
     results = find_black_images(first_folder)

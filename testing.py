@@ -20,26 +20,34 @@ except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'CP_last.pth' 
-BASE_DATA_PATH = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\tygsh\OneDrive\Desktop\KIE4002_FYP\Code\EfficientUNet++\b1_testing_result"
+MODEL_PATH = 'b0_best.pth' 
+BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_testing_result_3"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
 # Model Config (Must match your Training/test.py exactly)
-ENCODER_NAME = 'timm-efficientnet-b1'
+ENCODER_NAME = 'timm-efficientnet-b0'
 NUM_CLASSES = 1         
 INPUT_SHAPE = [640, 480] # [Height, Width]
 # ----------------------------------
 
 def calculate_complexity(model, input_shape, device):
+    """Calculates model complexity (params and FLOPs)."""
     try:
         from thop import profile
-        dummy_input = torch.randn(1, 3, input_shape[0], input_shape[1]).to(device)
+        dummy_input = torch.randn(1, 3, *input_shape).to(device)
         flops, params = profile(model, inputs=(dummy_input,), verbose=False)
         return params, flops
-    except Exception:
+    except ImportError:
+        logging.warning(
+            "Could not import 'thop'. FLOPs and Params will not be calculated. "
+            "Please install it (`pip install thop`) to get these metrics."
+        )
+        return 0, 0
+    except Exception as e:
+        logging.error(f"An error occurred during complexity calculation: {e}")
         return 0, 0
 
 def calculate_metrics(pred_mask, true_mask):

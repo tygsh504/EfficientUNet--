@@ -6,7 +6,7 @@ import sys
 import torch
 import torch.nn as nn
 from torch import optim
-import torch.amp  # Modern AMP namespace for RTX 4060
+import torch.amp  # Modern AMP namespace
 from tqdm import tqdm
 from metrics import dice_loss
 from eval import eval_net
@@ -20,8 +20,7 @@ import segmentation_models_pytorch.segmentation_models_pytorch as smp
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# --- 1. COMPATIBILITY PATCH ---
-# MOCK torch._six for compatibility with older libraries like timm 0.3.2
+# --- 1. COMPATIBILITY PATCH (From Notebook) ---
 import collections.abc
 import types
 if 'torch._six' not in sys.modules:
@@ -51,7 +50,7 @@ def train_net(net,
     n_train = len(train)
     n_val = len(val)
     
-    # --- 2. DATALOADER OPTIMIZATION ---
+    # DataLoader optimized for Windows/RTX 4060
     loader_args = dict(
         batch_size=batch_size, 
         num_workers=2, 
@@ -70,19 +69,15 @@ def train_net(net,
 
     logging.info(f'''Starting training (RTX 4060 Local):
         Epochs:          {epochs}
-        Batch size:      {batch_size} (Effective: {batch_size_effective})
+        Batch size:      {batch_size}
         Learning rate:   {lr}
-        Training size:   {n_train}
-        Validation size: {n_val}
         Mixed Precision: Enabled (Modern torch.amp)
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
     best_val_loss = float('inf')
-
-    # --- 3. MODERN AMP INITIALIZATION ---
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler('cuda') #
 
     history = {
         'epoch': [], 'learning_rate': [], 'train_loss': [], 'val_loss': [],
@@ -100,17 +95,17 @@ def train_net(net,
             for batch in train_loader:
                 imgs = torch.cat(batch['image'], dim = 0).to(device=device, dtype=torch.float32)
                 true_masks = torch.cat(batch['mask'], dim = 0)
+                # Force masks to float32 for proper Dice calculation in AMP
                 mask_type = torch.float32 if n_classes == 1 else torch.long
                 true_masks = true_masks.to(device=device, dtype=mask_type)
 
                 optimizer.zero_grad()
 
-                # --- 4. MODERN AUTOCAST ---
-                with torch.amp.autocast('cuda'):
+                with torch.amp.autocast('cuda'): #
                     masks_pred = net(imgs)                         
                     if n_classes == 1:
-                        bce_loss = nn.BCEWithLogitsLoss()
-                        loss = bce_loss(masks_pred, true_masks)
+                        # Balanced loss to prevent 0-Dice
+                        loss = nn.BCEWithLogitsLoss()(masks_pred, true_masks)
                         loss += dice_loss(masks_pred, true_masks).mean()
                     else:
                         loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
@@ -129,7 +124,7 @@ def train_net(net,
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
                 global_step += 1
 
-        # --- 5. EVALUATION & CONSOLE SUMMARY ---
+        # --- EVALUATION & CONSOLE LOGGING ---
         val_metrics = eval_net(net, val_loader, device, n_classes)
         train_metrics_full = eval_net(net, train_loader, device, n_classes)
         val_score = val_metrics['loss']
@@ -149,27 +144,31 @@ def train_net(net,
         extract_metrics(train_metrics_full, 'train', history)
         extract_metrics(val_metrics, 'val', history)
 
-        # Output summary to console
         logging.info(f'''
 Epoch {epoch + 1} Summary:
 -----------------------
 Train Loss: {history['train_loss'][-1]:.4f} | Train Dice: {history['train_dice'][-1]:.4f}
 Val Loss:   {history['val_loss'][-1]:.4f} | Val Dice:   {history['val_dice'][-1]:.4f}
-Learning Rate: {current_lr:.6f}
 -----------------------
 ''')
 
-        if save_cp and val_score < best_val_loss:
-            best_val_loss = val_score
-            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_best.pth'))
-            logging.info(f'New best checkpoint saved with Loss: {best_val_loss:.4f}')
+        if save_cp:
+            # 1. Save and prompt for the Last Epoch
+            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_last.pth'))
+            logging.info(f'Checkpoint: Last epoch ({epoch + 1}) weights saved to CP_last.pth')
+            
+            # 2. Save and prompt for the Best Epoch
+            if val_score < best_val_loss:
+                best_val_loss = val_score
+                torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_best.pth'))
+                logging.info(f'Checkpoint: New BEST model saved to CP_best.pth (Val Loss: {val_score:.4f})')
 
-    # Save Excel and Plots
+    # Final saving logic
     pd.DataFrame(history).to_excel(os.path.join(dir_checkpoint, 'training_metrics.xlsx'), index=False)
     plt.figure(figsize=(18, 5))
     plt.subplot(1,3,1); plt.plot(history['train_loss'], label='Train'); plt.plot(history['val_loss'], label='Val'); plt.title('Loss'); plt.legend()
     plt.subplot(1,3,2); plt.plot(history['learning_rate']); plt.title('LR'); plt.yscale('log')
-    plt.subplot(1,3,3); plt.plot(history['val_dice'], label='Val Dice'); plt.plot(history['train_dice'], label='Train Dice'); plt.title('Dice'); plt.legend()
+    plt.subplot(1,3,3); plt.plot(history['val_dice'], label='Val'); plt.plot(history['train_dice'], label='Train'); plt.title('Dice'); plt.legend()
     plt.savefig(os.path.join(dir_checkpoint, 'training_plot.jpg'))
     plt.close()
 
