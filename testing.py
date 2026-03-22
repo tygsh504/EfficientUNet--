@@ -20,15 +20,15 @@ except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'b0_best.pth' 
+MODEL_PATH = 'b2_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_testing_result_3"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b2\b2_testing_result_1"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
-# Model Config (Must match your Training/test.py exactly)
-ENCODER_NAME = 'timm-efficientnet-b0'
+# Model Config
+ENCODER_NAME = 'timm-efficientnet-b2'
 NUM_CLASSES = 1         
 INPUT_SHAPE = [640, 480] # [Height, Width]
 # ----------------------------------

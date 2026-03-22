@@ -95,6 +95,15 @@ def train_net(net,
     for epoch in range(epochs):
         net.train()
         epoch_loss = 0
+        
+        # Initialize training metric counters for the epoch
+        train_tot_inter = 0
+        train_tot_union = 0
+        train_tot_tp = 0
+        train_tot_fp = 0
+        train_tot_fn = 0
+        train_tot_tn = 0
+
         with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 imgs = batch['image']
@@ -121,6 +130,27 @@ def train_net(net,
                         bce_loss = nn.BCEWithLogitsLoss()
                         loss = bce_loss(masks_pred, true_masks)
                         loss += dice_loss(masks_pred, true_masks).mean()
+
+                        # Calculate metrics for the batch
+                        probs = torch.sigmoid(masks_pred)
+                        pred = probs > 0.5
+                        target = true_masks > 0.5
+                        
+                        pred_flat = pred.view(-1)
+                        target_flat = target.view(-1)
+
+                        tp = (pred_flat & target_flat).sum().item()
+                        fp = (pred_flat & ~target_flat).sum().item()
+                        fn = (~pred_flat & target_flat).sum().item()
+                        tn = (~pred_flat & ~target_flat).sum().item()
+
+                        train_tot_tp += tp
+                        train_tot_fp += fp
+                        train_tot_fn += fn
+                        train_tot_tn += tn
+                        
+                        train_tot_inter += tp
+                        train_tot_union += (pred_flat | target_flat).sum().item()
                     else:
                         loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
                         loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
@@ -152,12 +182,16 @@ def train_net(net,
         # 1. Validation Metrics
         val_metrics = eval_net(net, val_loader, device, n_classes)
         val_score = val_metrics['loss']
-        
-        # 2. Training Metrics 
-        # (Evaluating on training set to get the graph points you requested)
-        logging.info("Calculating training metrics (this may take a moment)...")
-        # We temporarily switch to eval mode for metric calculation to be accurate
-        train_metrics_full = eval_net(net, train_loader, device, n_classes)
+
+        # 2. Calculate final training metrics for the epoch
+        train_metrics_full = {}
+        if n_classes == 1:
+            epsilon = 1e-7
+            train_metrics_full['dice'] = (2. * train_tot_inter + epsilon) / (train_tot_tp + train_tot_fn + train_tot_tp + train_tot_fp + epsilon)
+            train_metrics_full['iou'] = train_tot_inter / (train_tot_union + epsilon)
+            train_metrics_full['accuracy'] = (train_tot_tp + train_tot_tn) / (train_tot_tp + train_tot_tn + train_tot_fp + train_tot_fn + epsilon)
+            train_metrics_full['precision'] = train_tot_tp / (train_tot_tp + train_tot_fp + epsilon)
+            train_metrics_full['recall'] = train_tot_tp / (train_tot_tp + train_tot_fn + epsilon)
         
         # Scheduler step based on validation loss
         scheduler.step(val_score)
@@ -194,6 +228,7 @@ def train_net(net,
         logging.info(f"Epoch {epoch+1} Results:")
         logging.info(f"  Train Loss: {avg_train_loss:.4f} | Val Loss: {val_score:.4f}")
         logging.info(f"  Train IoU:  {train_metrics_full.get('iou',0):.4f} | Val IoU:  {val_metrics.get('iou',0):.4f}")
+
 
         # Tensorboard
         writer.add_scalar('learning_rate', current_lr, global_step)

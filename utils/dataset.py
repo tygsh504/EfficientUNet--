@@ -78,7 +78,7 @@ class BasicSegmentationDataset(Dataset):
         # HWC to CHW
         img_trans = img_nd.transpose((2, 0, 1))
         if img_trans.max() > 1:
-            img_trans = img_trans / 255
+            img_trans = (img_trans / 255).astype(np.float32)
 
         return img_trans
 
