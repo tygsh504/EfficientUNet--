@@ -1,3 +1,4 @@
+# Original Code
 from PIL import Image, ImageEnhance, ImageOps
 import numpy as np
 import random
@@ -157,3 +158,180 @@ class CoronaryPolicy(object):
 
     def __repr__(self):
         return "Coronary Artery Segmentation Augmentation Policy"
+
+# from PIL import Image, ImageEnhance, ImageOps
+# import numpy as np
+# import random
+# from torchvision import transforms
+
+# class TNetPolicy(object):
+#     def __init__(self, scale_ranges=[0.8, 1.2], img_size=[512, 512], translate=[0.2, 0.2], rotation=[-30, 30], brightness=0.4):
+#         self.scale_ranges = scale_ranges 
+#         self.img_size = img_size
+#         self.translate = translate
+#         self.rotation = rotation
+#         self.brightness = brightness
+
+#     def __call__(self, image, mask=None):
+#         tf_mask = None
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=[0, 0], scale_ranges=self.scale_ranges, img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(mask, params[0], params[1], params[2], params[3])
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=self.translate, scale_ranges=[1, 1], img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         angle = transforms.RandomRotation.get_params(self.rotation)
+#         tf_image = transforms.functional.rotate(tf_image, angle)
+#         if mask is not None:
+#             tf_mask = transforms.functional.rotate(tf_mask, angle)
+
+#         tf = transforms.ColorJitter(brightness=self.brightness)
+#         tf_image = tf(tf_image)
+
+#         if mask is not None:
+#             return (tf_image, tf_mask)
+#         else:
+#             return tf_image
+    
+#     def __repr__(self):
+#         return "TNet Coronary Artery Segmentation Augmentation Policy"
+
+# class RetinaPolicy(object):
+#     def __init__(self, scale_ranges=[1, 1.1], img_size=[512, 512], translate=[0.1, 0.1], rotation=[-20, 20], crop_dims=[480, 480], brightness=None):
+#         self.scale_ranges = scale_ranges 
+#         self.img_size = img_size
+#         self.translate = translate
+#         self.rotation = rotation
+#         self.brightness = brightness
+#         self.crop_dims = crop_dims
+
+#     def __call__(self, image, mask=None):
+#         tf_mask = None
+
+#         i, j, h, w = transforms.RandomCrop.get_params(image, self.crop_dims)
+#         tf_image = transforms.functional.crop(image, i, j, h, w)
+#         if mask is not None:
+#             tf_mask = transforms.functional.crop(mask, i, j, h, w) 
+
+#         angle = transforms.RandomRotation.get_params(self.rotation)
+#         tf_image = transforms.functional.rotate(tf_image, angle)
+#         if mask is not None:
+#             tf_mask = transforms.functional.rotate(tf_mask, angle)   
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=self.translate, scale_ranges=[1, 1], img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=[0, 0], scale_ranges=self.scale_ranges, img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         if self.brightness is not None:
+#             tf = transforms.ColorJitter(brightness=self.brightness)
+#             tf_image = tf(tf_image)
+
+#         if mask is not None:
+#             return (tf_image, tf_mask)
+#         else:
+#             return tf_image
+
+#     def __repr__(self):
+#         return "Retinal Vessel Segmentation Augmentation Policy"
+
+# class CoronaryPolicy(object):
+#     def __init__(self, scale_ranges=[1, 1.1], img_size=[512, 512], translate=[0.1, 0.1], rotation=[-20, 20], brightness=None):
+#         self.scale_ranges = scale_ranges 
+#         self.img_size = img_size
+#         self.translate = translate
+#         self.rotation = rotation
+#         self.brightness = brightness
+
+#     def __call__(self, image, mask=None):
+#         tf_mask = None
+#         angle = transforms.RandomRotation.get_params(self.rotation)
+#         tf_image = transforms.functional.rotate(image, angle)
+#         if mask is not None:
+#             tf_mask = transforms.functional.rotate(mask, angle)   
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=self.translate, scale_ranges=[1, 1], img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         params = transforms.RandomAffine.get_params(degrees=[0, 0], translate=[0, 0], scale_ranges=self.scale_ranges, img_size=self.img_size, shears=[0, 0])
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         if self.brightness is not None:
+#             tf = transforms.ColorJitter(brightness=self.brightness)
+#             tf_image = tf(tf_image)
+
+#         if mask is not None:
+#             return (tf_image, tf_mask)
+#         else:
+#             return tf_image
+
+#     def __repr__(self):
+#         return "Coronary Artery Segmentation Augmentation Policy"
+
+# class CropPolicy(object):
+#     """
+#     Augmentation policy specifically tailored for crop disease detection in natural environments.
+#     Focuses on heavy color jittering (for sunlight/shadows), slight blur (for focus issues),
+#     and affine transformations (for varying camera angles).
+#     """
+#     def __init__(self, scale_ranges=[0.8, 1.2], rotation=[-45, 45], brightness=0.5, contrast=0.3, saturation=0.3):
+#         self.scale_ranges = scale_ranges 
+#         self.rotation = rotation
+#         self.brightness = brightness
+#         self.contrast = contrast
+#         self.saturation = saturation
+
+#     def __call__(self, image, mask=None):
+#         tf_mask = None
+
+#         # Random Rotation
+#         angle = transforms.RandomRotation.get_params(self.rotation)
+#         tf_image = transforms.functional.rotate(image, angle)
+#         if mask is not None:
+#             tf_mask = transforms.functional.rotate(mask, angle)   
+
+#         # Random Affine (Zoom and Shift)
+#         params = transforms.RandomAffine.get_params(
+#             degrees=[0, 0], 
+#             translate=[0.1, 0.1], 
+#             scale_ranges=self.scale_ranges, 
+#             img_size=image.size, 
+#             shears=[0, 0]
+#         )
+#         tf_image = transforms.functional.affine(tf_image, params[0], params[1], params[2], params[3])
+#         if mask is not None:
+#             tf_mask = transforms.functional.affine(tf_mask, params[0], params[1], params[2], params[3])
+
+#         # Environmental Lighting Simulation (Color Jitter)
+#         color_tf = transforms.ColorJitter(
+#             brightness=self.brightness, 
+#             contrast=self.contrast, 
+#             saturation=self.saturation
+#         )
+#         tf_image = color_tf(tf_image)
+
+#         # Occasional Blur (Simulates out-of-focus camera shots)
+#         if random.random() > 0.5:
+#             tf_image = transforms.functional.gaussian_blur(tf_image, kernel_size=[3, 3])
+
+#         if mask is not None:
+#             return (tf_image, tf_mask)
+#         else:
+#             return tf_image
+
+#     def __repr__(self):
+#         return "Crop Environmental Augmentation Policy"
