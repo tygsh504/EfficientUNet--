@@ -20,15 +20,15 @@ except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'b2_best.pth' 
+MODEL_PATH = 'b0_with_normal_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b2\b2_testing_result_1"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_with_normal"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
 # Model Config
-ENCODER_NAME = 'timm-efficientnet-b2'
+ENCODER_NAME = 'timm-efficientnet-b0'
 NUM_CLASSES = 1         
 INPUT_SHAPE = [640, 480] # [Height, Width]
 # ----------------------------------
@@ -127,7 +127,7 @@ def run_test_on_disease(disease_name, net, device, params, flops):
     
     if not os.path.exists(img_dir) or not os.path.exists(mask_dir):
         logging.warning(f"Skipping {disease_name}: Path not found.")
-        return
+        return None
 
     disease_output_dir = Path(MAIN_OUTPUT_DIR) / disease_name
     img_output_dir = disease_output_dir / "predictions"
@@ -169,6 +169,9 @@ def run_test_on_disease(disease_name, net, device, params, flops):
         with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
             df[['Filename'] + metric_cols].to_excel(writer, sheet_name='Detailed', index=False)
+            
+        return means
+    return None
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -176,6 +179,7 @@ if __name__ == '__main__':
 
     # Load Model using EXACT methodology from test.py
     try:
+        # net = smp.Unet(
         net = smp.EfficientUnetPlusPlus(
             encoder_name=ENCODER_NAME, 
             encoder_weights=None, 
@@ -183,7 +187,7 @@ if __name__ == '__main__':
             classes=NUM_CLASSES
         )
         
-        state_dict = torch.load(MODEL_PATH, map_location=device)
+        state_dict = torch.load(MODEL_PATH, map_location=device, weights_only=True)
         new_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
         net.load_state_dict(new_state_dict)
         net.to(device).eval()
@@ -194,7 +198,31 @@ if __name__ == '__main__':
 
     params, flops = calculate_complexity(net, INPUT_SHAPE, device)
 
+    all_disease_results = []
+
     for disease in DISEASES:
-        run_test_on_disease(disease, net, device, params, flops)
+        disease_means = run_test_on_disease(disease, net, device, params, flops)
+        if disease_means:
+            disease_means['Disease'] = disease
+            all_disease_results.append(disease_means)
+
+    if all_disease_results:
+        overall_df = pd.DataFrame(all_disease_results)
+        
+        # Move 'Disease' column to the front
+        cols = ['Disease'] + [c for c in overall_df.columns if c != 'Disease']
+        overall_df = overall_df[cols]
+        
+        # Calculate overall mean across all diseases
+        mean_row = overall_df.mean(numeric_only=True).to_dict()
+        mean_row['Disease'] = 'OVERALL_MEAN'
+        
+        # Append the calculated overall mean to the dataframe
+        overall_df = pd.concat([overall_df, pd.DataFrame([mean_row])], ignore_index=True)
+        
+        # Save to the main output directory
+        mean_output_path = Path(MAIN_OUTPUT_DIR) / 'calculated_mean.xlsx'
+        overall_df.to_excel(mean_output_path, index=False)
+        logging.info(f"Overall means saved to {mean_output_path}")
 
     print("\n--- All Testing Completed ---")
