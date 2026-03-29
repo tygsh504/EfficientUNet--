@@ -20,13 +20,13 @@ except ImportError:
 # --- USER CONFIGURATION SECTION ---
 MODEL_PATH = 'checkpoints/CP_best.pth' # Update this to your best model
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_with_normal"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_with_patching"
 
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
 ENCODER_NAME = 'timm-efficientnet-b0'
 NUM_CLASSES = 1         
-INPUT_SHAPE = [640, 480] # [Width, Height] for PIL
+INPUT_SHAPE = [480, 640] # [Width, Height] for PIL
 # ----------------------------------
 
 # --- SLIDING WINDOW FUNCTION ---

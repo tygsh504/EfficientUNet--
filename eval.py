@@ -242,27 +242,24 @@ def eval_net(net, loader, device, n_classes=3):
 
     with tqdm(total=n_val, desc='Validation round', unit='batch', leave=False) as pbar:
         for batch in loader:
-            # Note: For sliding window, batch size should strictly be 1
             imgs, true_masks = batch['image'], batch['mask']
             imgs = imgs.to(device=device, dtype=torch.float32)
             true_masks = true_masks.to(device=device, dtype=mask_type)
 
             with torch.no_grad():
-                # --- NEW: Use Sliding Window for Validation ---
                 pred_mask, pred_probs = predict_sliding_window_eval(net, imgs, patch_size=256, stride=128, num_classes=n_classes, device=device)
 
             if n_classes > 1:
                 true_masks = true_masks.squeeze(1)
                 tot_loss += dice_loss(pred_probs, true_masks, use_weights=True).item()
             else:
-                # Need to calculate BCE loss on stitched probabilities (clamp to prevent log(0) error)
                 logits_approx = torch.logit(pred_probs.clamp(1e-6, 1-1e-6))
                 tot_loss += bce_loss_fn(logits_approx, true_masks).item()
                 tot_loss += dice_loss(logits_approx, true_masks, use_weights=False).item()
                 
-                # Metrics Calculation
-                pred_flat = pred_mask.view(-1)
-                target_flat = true_masks.view(-1) > 0.5
+                # --- FIX: Convert floats to boolean before bitwise operations ---
+                pred_flat = pred_mask.view(-1).bool()
+                target_flat = (true_masks.view(-1) > 0.5).bool()
 
                 tp = (pred_flat & target_flat).sum().item()
                 fp = (pred_flat & ~target_flat).sum().item()

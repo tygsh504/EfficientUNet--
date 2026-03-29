@@ -6,7 +6,6 @@ import sys
 import torch
 import torch.nn as nn
 from torch import optim
-from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 from metrics import dice_loss
 from eval import eval_net
@@ -40,12 +39,9 @@ def train_net(net,
     n_val = len(val)
     
     train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    
-    # Validation strictly needs batch_size=1 to prevent tensor shape errors with sliding window
     val_loader = DataLoader(val, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
     batch_size_effective = (1 + augmentation_ratio) * batch_size
-
     writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size_effective}_SCALE_{img_scale}')
     global_step = 0
 
@@ -59,22 +55,17 @@ def train_net(net,
         Device:          {device.type}
         Images scaling:  {img_scale}
         Classes:         {n_classes}
-        Strategy:        Progressive Unfreezing + Cosine LR
+        Strategy:        Original Standard Training + ReduceLROnPlateau
     ''')
 
-    # --- MOD 3: PROGRESSIVE UNFREEZING INIT ---
-    for param in net.encoder.parameters():
-        param.requires_grad = False
-    # ------------------------------------------
-
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr)
-    
-    # --- MOD 4: COSINE ANNEALING LR ---
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    # ----------------------------------
+    # Standard Optimizer and Original Scheduler
+    optimizer = optim.Adam(net.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
     
     best_val_loss = float('inf')
-    scaler = GradScaler()
+    
+    # Updated to modern PyTorch AMP syntax to prevent warnings
+    scaler = torch.amp.GradScaler('cuda')
 
     history = {
         'epoch': [], 'learning_rate': [], 'train_loss': [], 'val_loss': [],
@@ -86,18 +77,6 @@ def train_net(net,
         os.makedirs(dir_checkpoint, exist_ok=True)
 
     for epoch in range(epochs):
-        
-        # --- MOD 3: UNFREEZE ENCODER LATER ---
-        if epoch == 10:
-            logging.info("Unfreezing encoder for fine-tuning...")
-            for param in net.encoder.parameters():
-                param.requires_grad = True
-            
-            # Re-init optimizer to include unfreezed weights
-            optimizer = optim.Adam(net.parameters(), lr=optimizer.param_groups[0]['lr'] * 0.1)
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(epochs-10))
-        # -------------------------------------
-
         net.train()
         epoch_loss = 0
         
@@ -109,7 +88,6 @@ def train_net(net,
                 imgs = batch['image']
                 true_masks = batch['mask']
                 
-                # Check if dataset generated multiple augmented tensors (like medical dataset did)
                 if isinstance(imgs, list):
                     imgs = torch.cat(imgs, dim=0)
                     true_masks = torch.cat(true_masks, dim=0)
@@ -120,23 +98,22 @@ def train_net(net,
 
                 optimizer.zero_grad()
 
-                with autocast():
+                # Updated to modern PyTorch AMP syntax
+                with torch.amp.autocast('cuda'):
                     masks_pred = net(imgs)                         
                     
                     if n_classes == 1:
-                        # --- MOD 1: TACKLE CLASS IMBALANCE ---
                         pos_weight = torch.tensor([5.0], device=device)
                         bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-                        # -------------------------------------
+                        
                         loss = bce_loss(masks_pred, true_masks)
                         loss += dice_loss(masks_pred, true_masks).mean()
 
                         probs = torch.sigmoid(masks_pred)
-                        pred = probs > 0.5
-                        target = true_masks > 0.5
                         
-                        pred_flat = pred.view(-1)
-                        target_flat = target.view(-1)
+                        # Explicitly cast to boolean to ensure stability
+                        pred_flat = (probs > 0.5).view(-1).bool()
+                        target_flat = (true_masks > 0.5).view(-1).bool()
 
                         tp = (pred_flat & target_flat).sum().item()
                         fp = (pred_flat & ~target_flat).sum().item()
@@ -179,7 +156,8 @@ def train_net(net,
             train_metrics_full['precision'] = train_tot_tp / (train_tot_tp + train_tot_fp + epsilon)
             train_metrics_full['recall'] = train_tot_tp / (train_tot_tp + train_tot_fn + epsilon)
         
-        scheduler.step()
+        # Step the Original Plateau Scheduler using the validation score
+        scheduler.step(val_score)
 
         current_lr = optimizer.param_groups[0]['lr']
         history['epoch'].append(epoch + 1)
@@ -280,7 +258,6 @@ if __name__ == '__main__':
 
     net.to(device=device)
 
-    # Instantiate datasets
     if args.dataset == 'LeafDisease':
         training_set = BasicSegmentationDataset(
             imgs_dir=args.train_img_dir, masks_dir=args.train_mask_dir, scale=args.scale, mask_suffix='', 
@@ -288,7 +265,7 @@ if __name__ == '__main__':
         )
         validation_set = BasicSegmentationDataset(
             imgs_dir=args.val_img_dir, masks_dir=args.val_mask_dir, scale=args.scale, mask_suffix='', 
-            augmentation_ratio=0, aug_policy=None # <-- CHANGE THIS TO None
+            augmentation_ratio=0, aug_policy=None
         )
     else:
         print("Invalid dataset")
