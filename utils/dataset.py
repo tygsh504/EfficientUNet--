@@ -12,6 +12,95 @@ from PIL import Image
 import torch.nn.functional as F
 from utils.augment import *
 
+import math
+import torchvision.transforms.functional as TF
+import random
+
+class PatchSegmentationDataset(Dataset):
+    def __init__(self, imgs_dir: str, masks_dir: str, patch_size: int = 256, stride: int = 128, mask_suffix: str = '', is_train: bool = True):
+        self.imgs_dir = imgs_dir
+        self.masks_dir = masks_dir
+        self.patch_size = patch_size
+        self.stride = stride
+        self.mask_suffix = mask_suffix
+        self.is_train = is_train
+        
+        self.ids = [splitext(file)[0] for file in listdir(imgs_dir) if not file.startswith('.')]
+        
+        # Calculate coordinates to ensure full overlapping coverage for every image
+        self.patches = []
+        for idx in self.ids:
+            img_glob = os.path.join(self.imgs_dir, idx + '.*')
+            img_file = glob(img_glob)[0]
+            
+            # We open the image just to read its size (this is very fast in PIL)
+            with Image.open(img_file) as img:
+                w, h = img.size
+            
+            y_steps = max(1, math.ceil((h - self.patch_size) / self.stride) + 1)
+            x_steps = max(1, math.ceil((w - self.patch_size) / self.stride) + 1)
+            
+            for y_idx in range(y_steps):
+                for x_idx in range(x_steps):
+                    # Ensure we don't go out of bounds (pulls the last patch backwards if needed)
+                    y_start = min(y_idx * self.stride, max(0, h - self.patch_size))
+                    x_start = min(x_idx * self.stride, max(0, w - self.patch_size))
+                    self.patches.append((idx, y_start, x_start))
+        
+        mode = "Training" if is_train else "Validation"
+        logging.info(f'{mode}: Created dataset with {len(self.ids)} images -> {len(self.patches)} patches.')
+
+    def __len__(self) -> int:
+        return len(self.patches)
+
+    def __getitem__(self, i):
+        idx, y_start, x_start = self.patches[i]
+        
+        mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+        img_glob = os.path.join(self.imgs_dir, idx + '.*')
+        
+        mask_file = glob(mask_glob)[0]
+        img_file = glob(img_glob)[0]
+        
+        mask = Image.open(mask_file).convert('L')
+        img = Image.open(img_file).convert('RGB')
+        
+        # Safety pad: in case any original image is actually smaller than 256x256
+        w, h = img.size
+        pad_w = max(0, self.patch_size - w)
+        pad_h = max(0, self.patch_size - h)
+        if pad_w > 0 or pad_h > 0:
+            img = TF.pad(img, (0, 0, pad_w, pad_h))
+            mask = TF.pad(mask, (0, 0, pad_w, pad_h))
+        
+        # Crop the exact overlapping patch
+        img_patch = img.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
+        mask_patch = mask.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
+        
+        # Apply standard Augmentations during Training
+        if self.is_train:
+            if random.random() > 0.5:
+                img_patch = TF.hflip(img_patch)
+                mask_patch = TF.hflip(mask_patch)
+            if random.random() > 0.5:
+                img_patch = TF.vflip(img_patch)
+                mask_patch = TF.vflip(mask_patch)
+            if random.random() > 0.3:
+                color_tf = transforms.ColorJitter(brightness=0.2, contrast=0.2)
+                img_patch = color_tf(img_patch)
+        
+        # Convert to Tensors
+        img_nd = np.array(img_patch).transpose((2, 0, 1))
+        img_trans = (img_nd / 255.0).astype(np.float32)
+        
+        mask_nd = np.array(mask_patch)
+        mask_trans = np.where(mask_nd > 128, 1.0, 0.0).astype(np.float32)
+
+        return {
+            'image': torch.from_numpy(img_trans),
+            'mask': torch.from_numpy(mask_trans).unsqueeze(0) 
+        }
+
 r"""
 Defines the `BasicSegmentationDataset` and `CoronaryArterySegmentationDatasets`, which extend the `Dataset` and `BasicSegmentationDataset` \ 
 classes, respectively. Each class defines the specific methods needed for data processing and a method :func:`__getitem__` to return samples.
