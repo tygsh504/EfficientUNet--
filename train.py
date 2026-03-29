@@ -109,8 +109,8 @@ def train_net(net,
                 imgs = batch['image']
                 true_masks = batch['mask']
                 
-                imgs = torch.cat(imgs, dim = 0)
-                true_masks = torch.cat(true_masks, dim = 0)
+                # imgs = torch.cat(imgs, dim = 0)
+                # true_masks = torch.cat(true_masks, dim = 0)
 
                 assert imgs.shape[1] == n_channels, \
                     f'Network has been defined with {n_channels} input channels, ' \
