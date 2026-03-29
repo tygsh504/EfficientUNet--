@@ -1,0 +1,298 @@
+import argparse
+import logging
+import os
+import sys
+
+import torch
+import torch.nn as nn
+from torch import optim
+from torch.cuda.amp import GradScaler, autocast
+from tqdm import tqdm
+from metrics import dice_loss
+from eval import eval_net
+
+from torch.utils.tensorboard import SummaryWriter
+from utils.dataset import CoronaryArterySegmentationDataset, RetinaSegmentationDataset, BasicSegmentationDataset
+from torch.utils.data import DataLoader
+from kornia.losses import focal_loss
+
+import segmentation_models_pytorch.segmentation_models_pytorch as smp
+import pandas as pd
+import matplotlib.pyplot as plt
+
+def train_net(net,
+              device,
+              training_set,
+              validation_set,
+              dir_checkpoint,
+              epochs=150,
+              batch_size=2,
+              lr=0.001,
+              save_cp=True,
+              img_scale=1,
+              n_classes=3,
+              n_channels=3, 
+              augmentation_ratio=0):
+
+    train = training_set 
+    val = validation_set
+    n_train = len(train)
+    n_val = len(val)
+    
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    
+    # Validation strictly needs batch_size=1 to prevent tensor shape errors with sliding window
+    val_loader = DataLoader(val, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+
+    batch_size_effective = (1 + augmentation_ratio) * batch_size
+
+    writer = SummaryWriter(comment=f'LR_{lr}_BS_{batch_size_effective}_SCALE_{img_scale}')
+    global_step = 0
+
+    logging.info(f'''Starting training:
+        Epochs:          {epochs}
+        Batch size:      {batch_size}
+        Learning rate:   {lr}
+        Training size:   {n_train}
+        Validation size: {n_val}
+        Checkpoints:     {save_cp}
+        Device:          {device.type}
+        Images scaling:  {img_scale}
+        Classes:         {n_classes}
+        Strategy:        Progressive Unfreezing + Cosine LR
+    ''')
+
+    # --- MOD 3: PROGRESSIVE UNFREEZING INIT ---
+    for param in net.encoder.parameters():
+        param.requires_grad = False
+    # ------------------------------------------
+
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr)
+    
+    # --- MOD 4: COSINE ANNEALING LR ---
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # ----------------------------------
+    
+    best_val_loss = float('inf')
+    scaler = GradScaler()
+
+    history = {
+        'epoch': [], 'learning_rate': [], 'train_loss': [], 'val_loss': [],
+        'train_acc': [], 'train_prec': [], 'train_rec': [], 'train_iou': [], 'train_dice': [],
+        'val_acc': [], 'val_prec': [], 'val_rec': [], 'val_iou': [], 'val_dice': []
+    }
+
+    if save_cp:
+        os.makedirs(dir_checkpoint, exist_ok=True)
+
+    for epoch in range(epochs):
+        
+        # --- MOD 3: UNFREEZE ENCODER LATER ---
+        if epoch == 10:
+            logging.info("Unfreezing encoder for fine-tuning...")
+            for param in net.encoder.parameters():
+                param.requires_grad = True
+            
+            # Re-init optimizer to include unfreezed weights
+            optimizer = optim.Adam(net.parameters(), lr=optimizer.param_groups[0]['lr'] * 0.1)
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=(epochs-10))
+        # -------------------------------------
+
+        net.train()
+        epoch_loss = 0
+        
+        train_tot_inter, train_tot_union = 0, 0
+        train_tot_tp, train_tot_fp, train_tot_fn, train_tot_tn = 0, 0, 0, 0
+
+        with tqdm(total=n_train, desc=f'Epoch {epoch + 1}/{epochs}', unit='img') as pbar:
+            for batch in train_loader:
+                imgs = batch['image']
+                true_masks = batch['mask']
+                
+                # Check if dataset generated multiple augmented tensors (like medical dataset did)
+                if isinstance(imgs, list):
+                    imgs = torch.cat(imgs, dim=0)
+                    true_masks = torch.cat(true_masks, dim=0)
+
+                imgs = imgs.to(device=device, dtype=torch.float32)
+                mask_type = torch.float32 if n_classes == 1 else torch.long
+                true_masks = true_masks.to(device=device, dtype=mask_type)
+
+                optimizer.zero_grad()
+
+                with autocast():
+                    masks_pred = net(imgs)                         
+                    
+                    if n_classes == 1:
+                        # --- MOD 1: TACKLE CLASS IMBALANCE ---
+                        pos_weight = torch.tensor([5.0], device=device)
+                        bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+                        # -------------------------------------
+                        loss = bce_loss(masks_pred, true_masks)
+                        loss += dice_loss(masks_pred, true_masks).mean()
+
+                        probs = torch.sigmoid(masks_pred)
+                        pred = probs > 0.5
+                        target = true_masks > 0.5
+                        
+                        pred_flat = pred.view(-1)
+                        target_flat = target.view(-1)
+
+                        tp = (pred_flat & target_flat).sum().item()
+                        fp = (pred_flat & ~target_flat).sum().item()
+                        fn = (~pred_flat & target_flat).sum().item()
+                        tn = (~pred_flat & ~target_flat).sum().item()
+
+                        train_tot_tp += tp
+                        train_tot_fp += fp
+                        train_tot_fn += fn
+                        train_tot_tn += tn
+                        
+                        train_tot_inter += tp
+                        train_tot_union += (pred_flat | target_flat).sum().item()
+                    else:
+                        loss = focal_loss(masks_pred, true_masks.squeeze(1), alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
+                        loss += dice_loss(masks_pred, true_masks.squeeze(1), True, k=0.75)
+
+                epoch_loss += loss.item()
+                writer.add_scalar('Loss/train', loss.item(), global_step)
+                pbar.set_postfix(**{'loss (batch)': loss.item()})
+
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_value_(net.parameters(), 0.1)
+                scaler.step(optimizer)
+                scaler.update()
+
+                pbar.update(imgs.shape[0])
+                global_step += 1
+
+        val_metrics = eval_net(net, val_loader, device, n_classes)
+        val_score = val_metrics['loss']
+
+        train_metrics_full = {}
+        if n_classes == 1:
+            epsilon = 1e-7
+            train_metrics_full['dice'] = (2. * train_tot_inter + epsilon) / (train_tot_tp + train_tot_fn + train_tot_tp + train_tot_fp + epsilon)
+            train_metrics_full['iou'] = train_tot_inter / (train_tot_union + epsilon)
+            train_metrics_full['accuracy'] = (train_tot_tp + train_tot_tn) / (train_tot_tp + train_tot_tn + train_tot_fp + train_tot_fn + epsilon)
+            train_metrics_full['precision'] = train_tot_tp / (train_tot_tp + train_tot_fp + epsilon)
+            train_metrics_full['recall'] = train_tot_tp / (train_tot_tp + train_tot_fn + epsilon)
+        
+        scheduler.step()
+
+        current_lr = optimizer.param_groups[0]['lr']
+        history['epoch'].append(epoch + 1)
+        history['learning_rate'].append(current_lr)
+        
+        avg_train_loss = epoch_loss / n_train
+        history['train_loss'].append(avg_train_loss) 
+        history['val_loss'].append(val_score)
+
+        def extract_metrics(metric_dict, prefix, hist_dict):
+            hist_dict[f'{prefix}_acc'].append(metric_dict.get('accuracy', 0))
+            hist_dict[f'{prefix}_prec'].append(metric_dict.get('precision', 0))
+            hist_dict[f'{prefix}_rec'].append(metric_dict.get('recall', 0))
+            hist_dict[f'{prefix}_iou'].append(metric_dict.get('iou', 0))
+            if 'dice' in metric_dict:
+                hist_dict[f'{prefix}_dice'].append(metric_dict['dice'])
+            else:
+                p, r = metric_dict.get('precision', 0), metric_dict.get('recall', 0)
+                hist_dict[f'{prefix}_dice'].append(2 * p * r / (p + r + 1e-8))
+
+        extract_metrics(train_metrics_full, 'train', history)
+        extract_metrics(val_metrics, 'val', history)
+
+        logging.info(f"Epoch {epoch+1} Results: Train Loss: {avg_train_loss:.4f} | Val Loss: {val_score:.4f} | Val IoU: {val_metrics.get('iou',0):.4f}")
+
+        writer.add_scalar('learning_rate', current_lr, global_step)
+        writer.add_scalar('Loss/test', val_score, global_step)
+
+        if save_cp and val_score < best_val_loss:
+            best_val_loss = val_score
+            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_best.pth'))
+            logging.info(f'New best checkpoint saved! Loss: {best_val_loss:.4f}')
+
+        if save_cp:
+            torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_last.pth'))
+
+    writer.close()
+
+    df = pd.DataFrame(history)
+    excel_path = os.path.join(dir_checkpoint, 'training_metrics.xlsx')
+    df.to_excel(excel_path, index=False)
+    logging.info(f'Metrics saved to {excel_path}')
+
+    try:
+        plt.figure(figsize=(18, 5))
+        plt.subplot(1, 3, 1)
+        plt.plot(history['epoch'], history['train_loss'], label='Train Loss')
+        plt.plot(history['epoch'], history['val_loss'], label='Val Loss', linestyle='--')
+        plt.legend()
+        plt.subplot(1, 3, 2)
+        plt.plot(history['epoch'], history['learning_rate'], label='LR')
+        plt.yscale('log')
+        plt.subplot(1, 3, 3)
+        plt.plot(history['epoch'], history['val_dice'], label='Val Dice')
+        plt.plot(history['epoch'], history['train_dice'], label='Train Dice', linestyle='--')
+        plt.legend()
+        plt.savefig(os.path.join(dir_checkpoint, 'training_plot.jpg'))
+        plt.close()
+    except Exception as e:
+        logging.error(f"Plots failed: {e}")
+
+def get_args():
+    parser = argparse.ArgumentParser(description='EfficientUNet++ train script')
+    parser.add_argument('-d', '--dataset', type=str, dest='dataset', required=True)
+    parser.add_argument('-ti', '--training-images-dir', type=str, default=None, dest='train_img_dir')
+    parser.add_argument('-tm', '--training-masks-dir', type=str, default=None, dest='train_mask_dir')
+    parser.add_argument('-vi', '--validation-images-dir', type=str, default=None, dest='val_img_dir')
+    parser.add_argument('-vm', '--validation-masks-dir', type=str, default=None, dest='val_mask_dir')
+    parser.add_argument('-enc', '--encoder', type=str, default='timm-efficientnet-b0', dest='encoder')
+    parser.add_argument('-e', '--epochs', type=int, default=150, dest='epochs')
+    parser.add_argument('-b', '--batch-size', type=int, default=8, dest='batchsize')
+    parser.add_argument('-l', '--learning-rate', type=float, default=0.001, dest='lr')
+    parser.add_argument('-f', '--load', type=str, default=False, dest='load')
+    parser.add_argument('-s', '--scale', type=float, default=1, dest='scale')
+    parser.add_argument('-a', '--augmentation-ratio', type=int, default=0, dest='augmentation_ratio')
+    parser.add_argument('-p', '--patch-size', type=int, default=256, dest='patch_size', help='Patch size for Crop dataset')
+    parser.add_argument('-c', '--dir_checkpoint', type=str, default='checkpoints/', dest='dir_checkpoint')
+    return parser.parse_args()
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    args = get_args()
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f'Using device {device}')
+
+    if args.dataset == 'DRIVE': n_classes = 2
+    elif args.dataset == 'Coronary': n_classes = 3
+    elif args.dataset == 'LeafDisease': n_classes = 1 
+
+    net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
+
+    if torch.cuda.device_count() > 1:
+        net = nn.DataParallel(net)
+
+    if args.load:
+        net.load_state_dict(torch.load(args.load, map_location=device))
+
+    net.to(device=device)
+
+    # Instantiate datasets
+    if args.dataset == 'LeafDisease':
+        training_set = BasicSegmentationDataset(
+            imgs_dir=args.train_img_dir, masks_dir=args.train_mask_dir, scale=args.scale, mask_suffix='', 
+            augmentation_ratio=args.augmentation_ratio, aug_policy='crop'
+        )
+        validation_set = BasicSegmentationDataset(
+            imgs_dir=args.val_img_dir, masks_dir=args.val_mask_dir, scale=args.scale, mask_suffix='', 
+            augmentation_ratio=0, aug_policy=None # <-- CHANGE THIS TO None
+        )
+    else:
+        print("Invalid dataset")
+        exit()
+
+    train_net(net=net, device=device, training_set=training_set, validation_set=validation_set, dir_checkpoint=args.dir_checkpoint,
+              epochs=args.epochs, batch_size=args.batchsize, lr=args.lr, img_scale=args.scale, n_classes=n_classes)
