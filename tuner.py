@@ -87,12 +87,13 @@ def objective(trial):
         net.train()
         
         # Training pass
-        for batch in train_loader:
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs_for_tuning}", leave=False)
+        for batch in pbar:
             imgs = batch['image'].to(device=device, dtype=torch.float32)
             true_masks = batch['mask'].to(device=device, dtype=torch.float32)
 
             optimizer.zero_grad()
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 masks_pred = net(imgs)
                 bce_loss = nn.BCEWithLogitsLoss()
                 loss = bce_loss(masks_pred, true_masks)

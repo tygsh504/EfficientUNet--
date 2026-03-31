@@ -189,6 +189,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from tqdm import tqdm
 from metrics import dice_loss
+from kornia.losses import focal_loss
 
 def predict_sliding_window_eval(model, image_tensor, patch_size=256, stride=128, num_classes=1, device='cuda'):
     """Helper for eval loop to do sliding window"""
@@ -237,8 +238,7 @@ def eval_net(net, loader, device, n_classes=3):
     tot_fn = 0
     tot_tn = 0
     
-    pos_weight = torch.tensor([5.0], device=device)
-    bce_loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    bce_loss_fn = nn.BCEWithLogitsLoss()
 
     with tqdm(total=n_val, desc='Validation round', unit='batch', leave=False) as pbar:
         for batch in loader:
@@ -251,7 +251,11 @@ def eval_net(net, loader, device, n_classes=3):
 
             if n_classes > 1:
                 true_masks = true_masks.squeeze(1)
-                tot_loss += dice_loss(pred_probs, true_masks, use_weights=True).item()
+                # Approximate logits to match training loss behavior and avoid double-softmax in dice_loss
+                logits_approx = torch.log(pred_probs.clamp(1e-6, 1-1e-6))
+                loss = focal_loss(logits_approx, true_masks, alpha=0.25, gamma=2, reduction='mean').unsqueeze(0)
+                loss += dice_loss(logits_approx, true_masks, True, k=0.75)
+                tot_loss += loss.item()
             else:
                 logits_approx = torch.logit(pred_probs.clamp(1e-6, 1-1e-6))
                 tot_loss += bce_loss_fn(logits_approx, true_masks).item()
