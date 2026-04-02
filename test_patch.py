@@ -12,70 +12,43 @@ from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
+# --- IMPORT MODEL ---
 try:
     import segmentation_models_pytorch.segmentation_models_pytorch as smp
 except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'checkpoints/CP_best.pth' # Update this to your best model
+MODEL_PATH = 'checkpoints\CP_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_with_patching"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_patch_2"
 
+# The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
+# Model Config
 ENCODER_NAME = 'timm-efficientnet-b0'
 NUM_CLASSES = 1         
-INPUT_SHAPE = [480, 640] # [Width, Height] for PIL
-# ----------------------------------
-
-# --- SLIDING WINDOW FUNCTION ---
-def predict_sliding_window(model, image_tensor, patch_size=256, stride=128, num_classes=1, device='cuda'):
-    """Slices image into overlapping patches, predicts, and averages results."""
-    model.eval()
-    B, C, H, W = image_tensor.shape
-    
-    pred_canvas = torch.zeros((B, num_classes, H, W), device=device)
-    count_canvas = torch.zeros((B, num_classes, H, W), device=device)
-
-    y_steps = list(range(0, max(1, H - patch_size), stride)) + [max(0, H - patch_size)]
-    x_steps = list(range(0, max(1, W - patch_size), stride)) + [max(0, W - patch_size)]
-    
-    # Remove duplicates if image is smaller than patch
-    y_steps = sorted(list(set(y_steps)))
-    x_steps = sorted(list(set(x_steps)))
-
-    with torch.no_grad():
-        for y in y_steps:
-            for x in x_steps:
-                patch = image_tensor[:, :, y:y+patch_size, x:x+patch_size]
-                logits = model(patch)
-                
-                if num_classes == 1:
-                    probs = torch.sigmoid(logits)
-                else:
-                    probs = torch.softmax(logits, dim=1)
-                    
-                pred_canvas[:, :, y:y+patch_size, x:x+patch_size] += probs
-                count_canvas[:, :, y:y+patch_size, x:x+patch_size] += 1
-
-    final_probs = pred_canvas / count_canvas
-    if num_classes == 1:
-        final_mask = (final_probs > 0.5).float()
-    else:
-        final_mask = torch.argmax(final_probs, dim=1).unsqueeze(1).float()
-        
-    return final_mask, final_probs
-
+INPUT_SHAPE = [640, 480] # [Height, Width]
+PATCH_SIZE = (256, 256)  # Sliding Window Size
+STRIDE = (128, 128)      # 50% Overlap for smoother edges
 # ----------------------------------
 
 def calculate_complexity(model, input_shape, device):
+    """Calculates model complexity (params and FLOPs)."""
     try:
         from thop import profile
-        dummy_input = torch.randn(1, 3, input_shape[1], input_shape[0]).to(device)
+        dummy_input = torch.randn(1, 3, *input_shape).to(device)
         flops, params = profile(model, inputs=(dummy_input,), verbose=False)
         return params, flops
+    except ImportError:
+        logging.warning(
+            "Could not import 'thop'. FLOPs and Params will not be calculated. "
+            "Please install it (`pip install thop`) to get these metrics."
+        )
+        return 0, 0
     except Exception as e:
+        logging.error(f"An error occurred during complexity calculation: {e}")
         return 0, 0
 
 def calculate_metrics(pred_mask, true_mask):
@@ -136,7 +109,8 @@ class SimpleDataset(Dataset):
         img = Image.open(img_path).convert('RGB')
         mask = Image.open(mask_path)
 
-        target_size = (self.input_shape[0], self.input_shape[1]) 
+        # PIL resize takes (Width, Height)
+        target_size = (self.input_shape[1], self.input_shape[0]) 
         img = img.resize(target_size, Image.BILINEAR)
         mask = mask.resize(target_size, Image.NEAREST)
 
@@ -147,6 +121,52 @@ class SimpleDataset(Dataset):
         mask_tensor = torch.from_numpy(mask_np).unsqueeze(0)
 
         return {'image': img_tensor, 'mask': mask_tensor, 'name': idx}
+
+def sliding_window_inference(inputs, model, window_size, stride):
+    """
+    Extracts patches, predicts, and averages the overlapping patches seamlessly.
+    """
+    B, C, H, W = inputs.shape
+    h_crop, w_crop = window_size
+    h_stride, w_stride = stride
+    
+    # Calculate start coordinates, ensuring we cover the right and bottom edges completely
+    y_coords = list(range(0, H - h_crop, h_stride)) + [H - h_crop]
+    x_coords = list(range(0, W - w_crop, w_stride)) + [W - w_crop]
+    
+    # Remove duplicates
+    y_coords = sorted(list(set(y_coords)))
+    x_coords = sorted(list(set(x_coords)))
+
+    output_probs = None
+    count_map = torch.zeros((B, NUM_CLASSES, H, W), device=inputs.device)
+
+    for y in y_coords:
+        for x in x_coords:
+            # 1. Extract 256x256 patch
+            patch = inputs[:, :, y : y + h_crop, x : x + w_crop]
+            
+            # 2. Forward pass patch through model
+            with torch.no_grad():
+                logits = model(patch)
+                if NUM_CLASSES == 1:
+                    probs = torch.sigmoid(logits)
+                else:
+                    probs = torch.softmax(logits, dim=1)
+            
+            # 3. Initialize prediction canvas dynamically
+            if output_probs is None:
+                out_C = probs.shape[1]
+                output_probs = torch.zeros((B, out_C, H, W), device=inputs.device)
+                count_map = torch.zeros((B, out_C, H, W), device=inputs.device)
+            
+            # 4. Add patch probabilities to the canvas
+            output_probs[:, :, y : y + h_crop, x : x + w_crop] += probs
+            count_map[:, :, y : y + h_crop, x : x + w_crop] += 1.0
+
+    # Average overlapping areas
+    output_probs = output_probs / count_map
+    return output_probs
 
 def run_test_on_disease(disease_name, net, device, params, flops):
     img_dir = os.path.join(BASE_DATA_PATH, disease_name, "Infer_Ori")
@@ -171,9 +191,19 @@ def run_test_on_disease(disease_name, net, device, params, flops):
             true_masks = batch['mask'].to(device, dtype=torch.float32)
             img_names = batch['name']
 
-            # --- NEW SLIDING WINDOW INFERENCE ---
-            pred_masks, _ = predict_sliding_window(net, images, patch_size=256, stride=128, num_classes=NUM_CLASSES, device=device)
-            # ------------------------------------
+            # --- APPLIED SLIDING WINDOW INFERENCE ---
+            probs = sliding_window_inference(
+                inputs=images, 
+                model=net, 
+                window_size=PATCH_SIZE, 
+                stride=STRIDE
+            )
+            
+            # Thresholding logic from original script
+            if NUM_CLASSES == 1:
+                pred_masks = (probs > 0.5).float()
+            else:
+                pred_masks = torch.argmax(probs, dim=1).unsqueeze(1).float()
 
             metrics = calculate_metrics(pred_masks[0], true_masks[0])
             metrics['Filename'] = img_names[0]
@@ -199,6 +229,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    # Load Model using EXACT methodology from test.py
     try:
         net = smp.EfficientUnetPlusPlus(
             encoder_name=ENCODER_NAME, 
@@ -207,7 +238,7 @@ if __name__ == '__main__':
             classes=NUM_CLASSES
         )
         
-        state_dict = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+        state_dict = torch.load(MODEL_PATH, map_location=device, weights_only=True)
         new_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
         net.load_state_dict(new_state_dict)
         net.to(device).eval()
@@ -216,7 +247,8 @@ if __name__ == '__main__':
         logging.error(f"Failed to load model architecture: {e}")
         exit(1)
 
-    params, flops = calculate_complexity(net, INPUT_SHAPE, device)
+    # Note: Complexity is calculated using the patch size (256x256) since that's what the model natively processes now
+    params, flops = calculate_complexity(net, PATCH_SIZE, device)
 
     all_disease_results = []
 
@@ -228,14 +260,19 @@ if __name__ == '__main__':
 
     if all_disease_results:
         overall_df = pd.DataFrame(all_disease_results)
+        
+        # Move 'Disease' column to the front
         cols = ['Disease'] + [c for c in overall_df.columns if c != 'Disease']
         overall_df = overall_df[cols]
         
+        # Calculate overall mean across all diseases
         mean_row = overall_df.mean(numeric_only=True).to_dict()
         mean_row['Disease'] = 'OVERALL_MEAN'
         
+        # Append the calculated overall mean to the dataframe
         overall_df = pd.concat([overall_df, pd.DataFrame([mean_row])], ignore_index=True)
         
+        # Save to the main output directory
         mean_output_path = Path(MAIN_OUTPUT_DIR) / 'calculated_mean.xlsx'
         overall_df.to_excel(mean_output_path, index=False)
         logging.info(f"Overall means saved to {mean_output_path}")
