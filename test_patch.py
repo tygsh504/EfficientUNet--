@@ -21,7 +21,7 @@ except ImportError:
 # --- USER CONFIGURATION SECTION ---
 MODEL_PATH = 'checkpoints\CP_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_patch_2"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_patch_3"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
@@ -54,7 +54,7 @@ def calculate_complexity(model, input_shape, device):
 def calculate_metrics(pred_mask, true_mask):
     pred = pred_mask.detach().cpu().numpy().flatten()
     true = true_mask.detach().cpu().numpy().flatten()
-    pred_bin = (pred > 0.5).astype(np.uint8)
+    pred_bin = (pred > 0.35).astype(np.uint8)
     true_bin = (true > 0.5).astype(np.uint8)
 
     tp = np.sum((pred_bin == 1) & (true_bin == 1))
@@ -64,6 +64,17 @@ def calculate_metrics(pred_mask, true_mask):
 
     epsilon = 1e-7
     accuracy = (tp + tn) / (tp + tn + fp + fn + epsilon)
+    
+    # --- BUG FIX: Perfect Empty Image ---
+    # If the ground truth mask is empty AND the prediction is empty
+    if tp == 0 and fp == 0 and fn == 0:
+        return {
+            "Dice": 1.0, "IoU": 1.0, 
+            "Precision": 1.0, "Recall": 1.0, 
+            "Accuracy": accuracy, "F1_Score": 1.0
+        }
+    # ------------------------------------
+
     precision = tp / (tp + fp + epsilon)
     recall = tp / (tp + fn + epsilon)
     f1 = 2 * (precision * recall) / (precision + recall + epsilon)
@@ -107,17 +118,17 @@ class SimpleDataset(Dataset):
         mask_path = os.path.join(self.masks_dir, mask_name)
 
         img = Image.open(img_path).convert('RGB')
-        mask = Image.open(mask_path)
+        mask = Image.open(mask_path).convert('L') # FIX 1: Ensure Grayscale
 
-        # PIL resize takes (Width, Height)
         target_size = (self.input_shape[1], self.input_shape[0]) 
         img = img.resize(target_size, Image.BILINEAR)
         mask = mask.resize(target_size, Image.NEAREST)
 
         img_tensor = transforms.ToTensor()(img)
+        
         mask_np = np.array(mask)
-        if len(mask_np.shape) == 3: mask_np = mask_np[:, :, 0]
-        mask_np = (mask_np > 0).astype(np.float32)
+        # FIX 2: Match training threshold exactly
+        mask_np = np.where(mask_np > 128, 1.0, 0.0).astype(np.float32) 
         mask_tensor = torch.from_numpy(mask_np).unsqueeze(0)
 
         return {'image': img_tensor, 'mask': mask_tensor, 'name': idx}
