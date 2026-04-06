@@ -1,4 +1,691 @@
-# Original Code
+# # Original Code
+# from os.path import splitext
+# from os import listdir
+# import os
+# from typing import Dict, List
+# import numpy as np
+# from glob import glob
+# import torch
+# from torch.utils.data import Dataset
+# import logging
+# from PIL import Image
+# import torch.nn.functional as F
+# from utils.augment import *
+
+# import math
+# import torchvision.transforms.functional as TF
+# import random
+
+# class PatchSegmentationDataset(Dataset):
+#     def __init__(self, imgs_dir: str, masks_dir: str, patch_size: int = 256, stride: int = 128, mask_suffix: str = '', is_train: bool = True):
+#         self.imgs_dir = imgs_dir
+#         self.masks_dir = masks_dir
+#         self.patch_size = patch_size
+#         self.stride = stride
+#         self.mask_suffix = mask_suffix
+#         self.is_train = is_train
+        
+#         self.ids = [splitext(file)[0] for file in listdir(imgs_dir) if not file.startswith('.')]
+        
+#         # Calculate coordinates to ensure full overlapping coverage for every image
+#         self.patches = []
+#         for idx in self.ids:
+#             img_glob = os.path.join(self.imgs_dir, idx + '.*')
+#             img_file = glob(img_glob)[0]
+            
+#             # We open the image just to read its size (this is very fast in PIL)
+#             with Image.open(img_file) as img:
+#                 w, h = img.size
+            
+#             y_steps = max(1, math.ceil((h - self.patch_size) / self.stride) + 1)
+#             x_steps = max(1, math.ceil((w - self.patch_size) / self.stride) + 1)
+            
+#             for y_idx in range(y_steps):
+#                 for x_idx in range(x_steps):
+#                     # Ensure we don't go out of bounds (pulls the last patch backwards if needed)
+#                     y_start = min(y_idx * self.stride, max(0, h - self.patch_size))
+#                     x_start = min(x_idx * self.stride, max(0, w - self.patch_size))
+#                     self.patches.append((idx, y_start, x_start))
+        
+#         mode = "Training" if is_train else "Validation"
+#         logging.info(f'{mode}: Created dataset with {len(self.ids)} images -> {len(self.patches)} patches.')
+
+#     def __len__(self) -> int:
+#         return len(self.patches)
+
+#     def __getitem__(self, i):
+#         idx, y_start, x_start = self.patches[i]
+        
+#         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+#         img_glob = os.path.join(self.imgs_dir, idx + '.*')
+        
+#         mask_file = glob(mask_glob)[0]
+#         img_file = glob(img_glob)[0]
+        
+#         mask = Image.open(mask_file).convert('L')
+#         img = Image.open(img_file).convert('RGB')
+        
+#         # Safety pad: in case any original image is actually smaller than 256x256
+#         w, h = img.size
+#         pad_w = max(0, self.patch_size - w)
+#         pad_h = max(0, self.patch_size - h)
+#         if pad_w > 0 or pad_h > 0:
+#             img = TF.pad(img, (0, 0, pad_w, pad_h))
+#             mask = TF.pad(mask, (0, 0, pad_w, pad_h))
+        
+#         # Crop the exact overlapping patch
+#         img_patch = img.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
+#         mask_patch = mask.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
+        
+#         # Apply standard Augmentations during Training
+#         if self.is_train:
+#             if random.random() > 0.5:
+#                 img_patch = TF.hflip(img_patch)
+#                 mask_patch = TF.hflip(mask_patch)
+#             if random.random() > 0.5:
+#                 img_patch = TF.vflip(img_patch)
+#                 mask_patch = TF.vflip(mask_patch)
+#             if random.random() > 0.3:
+#                 color_tf = transforms.ColorJitter(brightness=0.2, contrast=0.2)
+#                 img_patch = color_tf(img_patch)
+        
+#         # Convert to Tensors
+#         img_nd = np.array(img_patch).transpose((2, 0, 1))
+#         img_trans = (img_nd / 255.0).astype(np.float32)
+        
+#         mask_nd = np.array(mask_patch)
+#         mask_trans = np.where(mask_nd > 128, 1.0, 0.0).astype(np.float32)
+
+#         return {
+#             'image': torch.from_numpy(img_trans),
+#             'mask': torch.from_numpy(mask_trans).unsqueeze(0) 
+#         }
+
+# r"""
+# Defines the `BasicSegmentationDataset` and `CoronaryArterySegmentationDatasets`, which extend the `Dataset` and `BasicSegmentationDataset` \ 
+# classes, respectively. Each class defines the specific methods needed for data processing and a method :func:`__getitem__` to return samples.
+# """
+
+# # class BasicSegmentationDataset(Dataset):
+# #     r"""
+# #     Implements a basic dataset for segmentation tasks, with methods for image and mask scaling and normalization. \
+# #     The filenames of the segmentation ground truths must be equal to the filenames of the images to be segmented, \
+# #     except for a possible suffix.
+
+# #     Args:
+# #         imgs_dir (str): path to the directory containing the images to be segmented.
+# #         masks_dir (str): path to the directory containing the segmentation ground truths.
+# #         scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
+# #         mask_suffix (str, optional): suffix to be added to an image's filename to obtain its 
+# #             ground truth filename.
+# #     """
+
+# #     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = ''):
+# #         self.imgs_dir = imgs_dir
+# #         self.masks_dir = masks_dir
+# #         self.scale = scale
+# #         self.mask_suffix = mask_suffix
+# #         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
+
+# #         self.ids = [splitext(file)[0] for file in listdir(imgs_dir)
+# #                     if not file.startswith('.')]
+# #         logging.info(f'Creating dataset with {len(self.ids)} examples')
+
+# #     def __len__(self) -> int:
+# #         r"""
+# #         Returns the size of the dataset.
+# #         """
+# #         return len(self.ids)
+
+# #     @classmethod
+# #     def preprocess(cls, pil_img: Image, scale: float) -> Image:
+# #         r"""
+# #         Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
+# #         the CHW format.
+
+# #         Args:
+# #             pil_imgs (Image): object of class `Image` to be preprocessed.
+# #             scale (float): image scale, between 0 and 1.
+# #         """
+# #         w, h = pil_img.size
+# #         newW, newH = int(scale * w), int(scale * h)
+        
+# #         # FIX: Force dimensions to be multiples of 32 to prevent feature map size mismatch in U-Net
+# #         newW = int(round(newW / 32) * 32)
+# #         newH = int(round(newH / 32) * 32)
+        
+# #         # Safety check to prevent 0x0 images
+# #         if newW < 32: newW = 32
+# #         if newH < 32: newH = 32
+        
+# #         pil_img = pil_img.resize((newW, newH))
+
+# #         img_nd = np.array(pil_img)
+
+# #         if len(img_nd.shape) == 2:
+# #             img_nd = np.expand_dims(img_nd, axis=2)
+
+# #         # HWC to CHW
+# #         img_trans = img_nd.transpose((2, 0, 1))
+# #         if img_trans.max() > 1:
+# #             img_trans = (img_trans / 255).astype(np.float32)
+
+# #         return img_trans
+
+# #     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
+# #         r"""
+# #         Returns two tensors: an image and the corresponding mask. 
+# #         """
+# #         idx = self.ids[i]
+        
+# #         # Safe path construction
+# #         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+# #         img_glob = os.path.join(self.imgs_dir, idx + '.*')
+        
+# #         mask_file = glob(mask_glob)
+# #         img_file = glob(img_glob)
+
+# #         assert len(mask_file) == 1, \
+# #             f'Either no mask or multiple masks found for the ID {idx}: {mask_file} (Searched: {mask_glob})'
+# #         assert len(img_file) == 1, \
+# #             f'Either no image or multiple images found for the ID {idx}: {img_file} (Searched: {img_glob})'
+# #         mask = Image.open(mask_file[0])
+# #         img = Image.open(img_file[0])
+        
+# #         # --- FIX: Ensure image is RGB (3 channels) ---
+# #         if img.mode != 'RGB':
+# #             img = img.convert('RGB')
+# #         # ---------------------------------------------
+
+# #         assert img.size == mask.size, \
+# #             f'Image and mask {idx} should be the same size, but are {img.size} and {mask.size}'
+
+# #         img = self.preprocess(img, self.scale)
+# #         mask = self.preprocess(mask, self.scale)
+
+# #         return {
+# #             'image': [torch.from_numpy(img).type(torch.FloatTensor)],
+# #             'mask': [torch.from_numpy(mask).type(torch.FloatTensor)]
+# #         }
+
+# class BasicSegmentationDataset(Dataset):
+#     # Notice we added augmentation_ratio and aug_policy here to fix your error
+#     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = '', augmentation_ratio: int = 0, aug_policy: str = None):
+#         self.imgs_dir = imgs_dir
+#         self.masks_dir = masks_dir
+#         self.scale = scale
+#         self.mask_suffix = mask_suffix
+#         self.augmentation_ratio = augmentation_ratio
+#         self.policy = aug_policy
+        
+#         self.ids = [splitext(file)[0] for file in listdir(imgs_dir) if not file.startswith('.')]
+#         logging.info(f'Creating dataset with {len(self.ids)} examples')
+
+#     def __len__(self) -> int:
+#         return len(self.ids)
+
+#     def __getitem__(self, i):
+#         idx = self.ids[i]
+#         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+#         img_glob = os.path.join(self.imgs_dir, idx + '.*')
+        
+#         mask_file = glob(mask_glob)[0]
+#         img_file = glob(img_glob)[0]
+        
+#         mask = Image.open(mask_file).convert('L')
+#         img = Image.open(img_file).convert('RGB')
+        
+#         # --- PHASE 1: TRAINING (Random 256x256 Patches + Augmentation) ---
+#         if self.policy == 'crop':
+#             import torchvision.transforms as transforms
+#             import random
+            
+#             # 1. Random Crop
+#             i_crop, j_crop, h_crop, w_crop = transforms.RandomCrop.get_params(img, output_size=(256, 256))
+#             img = transforms.functional.crop(img, i_crop, j_crop, h_crop, w_crop)
+#             mask = transforms.functional.crop(mask, i_crop, j_crop, h_crop, w_crop)
+            
+#             # 2. Geometric Augmentations
+#             if random.random() > 0.5:
+#                 img = transforms.functional.hflip(img)
+#                 mask = transforms.functional.hflip(mask)
+#             if random.random() > 0.5:
+#                 img = transforms.functional.vflip(img)
+#                 mask = transforms.functional.vflip(mask)
+                
+#             # 3. Environmental Lighting
+#             color_tf = transforms.ColorJitter(brightness=0.4, contrast=0.3, saturation=0.3)
+#             img = color_tf(img)
+            
+#             if random.random() > 0.7:
+#                 img = transforms.functional.gaussian_blur(img, kernel_size=[3, 3])
+
+#         else:
+#             # --- PHASE 2: VALIDATION (Full 480x640 Image) ---
+#             if self.scale != 1:
+#                 target_size = (int(img.size[0] * self.scale), int(img.size[1] * self.scale))
+#                 img = img.resize(target_size, Image.BILINEAR)
+#                 mask = mask.resize(target_size, Image.NEAREST)
+
+#         # Convert to Tensors
+#         img_nd = np.array(img).transpose((2, 0, 1))
+#         img_trans = (img_nd / 255.0).astype(np.float32)
+        
+#         mask_nd = np.array(mask)
+#         mask_trans = np.where(mask_nd > 128, 1.0, 0.0).astype(np.float32)
+
+#         return {
+#             'image': torch.from_numpy(img_trans),
+#             'mask': torch.from_numpy(mask_trans).unsqueeze(0) 
+#         }
+
+# class RetinaSegmentationDataset(BasicSegmentationDataset):
+#     r"""
+#     Implements a dataset for the Retinal Vessel Segmentation task
+
+#     Args:
+#         imgs_dir (str): path to the directory containing the images to be segmented.
+#         masks_dir (str): path to the directory containing the segmentation ground truths.
+#         scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
+#         augmentation_ratio (int, optional): number of augmentations to generate per image.
+#         crop_size (int, optional): size of the square image to be fed to the model.
+#         aug_policy (str, optional): data augmentation policy.
+#     """
+#     # Number of classes, including the background class
+#     n_classes = 2
+
+#     # Maps maks grayscale value to mask class index
+#     gray2class_mapping = {
+#         0: 0,
+#         255: 1
+#     }
+
+#     # Maps mask grayscale value to mask RGB value
+#     gray2rgb_mapping = {
+#         0: (0, 0, 0),
+#         255: (255, 255, 255)
+#     }
+#     rgb2class_mapping = {
+#         (0, 0, 0): 0,
+#         (255, 255, 255): 1
+#     }
+
+#     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, augmentation_ratio: int = 0, crop_size: int = 512, aug_policy: str = 'retina'):
+#         super().__init__(imgs_dir, masks_dir, scale)
+#         self.augmentation_ratio = augmentation_ratio
+#         self.policy = aug_policy
+#         self.crop_size = crop_size
+
+#     @classmethod
+#     def mask_img2class_mask(cls, pil_mask: Image, scale: float) -> np.array:
+#         r"""
+#         Preprocesses a grayscale `Image` containing a segmentation mask, rescaling it, converting its grayscale values \
+#         to class indices and returning it as a NumPy array in the CHW format.
+
+#         Args:
+#             pil_imgs (Image): object of class `Image` to be preprocessed.
+#             scale (float): image scale, between 0 and 1.
+#         """
+#         w, h = pil_mask.size
+#         newW, newH = int(scale * w), int(scale * h)
+#         assert newW > 0 and newH > 0, 'Scale is too small'
+#         pil_mask = pil_mask.resize((newW, newH))
+
+#         if pil_mask.mode != "L":
+#             pil_mask = pil_mask.convert(mode="L")
+#         mask_nd = np.array(pil_mask)
+
+#         if len(mask_nd.shape) == 2:
+#             mask_nd = np.expand_dims(mask_nd, axis=2)
+
+#         # HWC to CHW
+#         mask = mask_nd.transpose((2, 0, 1))
+#         mask = mask / 255
+
+#         return mask
+
+#     @classmethod
+#     def one_hot2mask(cls, one_hot_mask: torch.FloatTensor, shape: str = 'CHW') -> np.array:
+#         r"""
+#         Returns the one-channel mask (1HW) corresponding to the CHW one-hot encoded one.
+#         """
+#         # Assuming tensor in CHW shape
+#         if shape == 'CHW':
+#             return np.argmax(one_hot_mask.detach().numpy(), axis=0)
+#         elif shape == 'NCHW':
+#             return np.argmax(one_hot_mask.detach().numpy(), axis=1)
+#         return np.argmax(one_hot_mask.detach().numpy(), axis=0)
+
+#     @classmethod
+#     def mask2one_hot(cls, mask_tensor: torch.FloatTensor, output_shape: str = 'NHWC') -> torch.Tensor:
+#         r"""
+#         Returns the received `FloatTensor` in the N1HW shape to a one hot encoded `LongTensor` in the NHWC shape.\
+#             Can return in NCHW shape is specified.
+
+#         Args:
+#             mask_tensor (FloatTensor): N1HW FloatTensor to be one-hot encoded.
+#             output_shape (str): NHWC or NCHW.
+#         """
+#         assert output_shape == 'NHWC' or output_shape == 'NCHW', 'Invalid output shape specified'
+
+#         # Assuming tensor in NCHW = N1HW shape
+#         if output_shape == 'NHWC':
+#             return F.one_hot(mask_tensor, cls.n_classes).squeeze(1)
+#         # Assuming tensor in N1HW shape
+#         elif output_shape == 'NCHW':
+#             return torch.transpose(torch.transpose(F.one_hot(mask_tensor, cls.n_classes), 2, 3), 1, 2)
+
+#     @classmethod
+#     def class2gray(cls, mask: np.array) -> np.array:
+#         r"""
+#         Replaces the class labels in a numpy array represented mask by their grayscale values, according to `gray2class_mapping`.
+#         """
+#         assert len(cls.gray2class_mapping) == cls.n_classes, \
+#             f'Number of class mappings - {len(cls.gray2class_mapping)} - should be the same as the number of classes - {cls.n_classes}'
+#         for color, label in cls.gray2class_mapping.items():
+#             mask[mask == label] = color
+#         return mask
+    
+#     @classmethod 
+#     def gray2rgb(cls, img: Image) -> Image:
+#         r"""
+#         Converts a grayscale image into an RGB one, according to gray2rgb_mapping.
+#         """
+#         rgb_img = Image.new("RGB", img.size)
+#         for x in range(img.size[0]):
+#             for y in range(img.size[1]):
+#                 rgb_img.putpixel((x, y), cls.gray2rgb_mapping[img.getpixel((x, y))])
+#         return rgb_img
+
+#     @classmethod
+#     def mask2image(cls, mask: np.array) -> Image:
+#         r"""
+#         Converts a one-channel mask (1HW) with class indices into an RGB image, according to gray2class_mapping and gray2rgb_mapping.
+#         """
+#         return cls.gray2rgb(Image.fromarray(cls.class2gray(mask).astype(np.uint8)))
+
+#     def augment(self, image, mask, policy = 'retina', augmentation_ratio = 0):
+#         """
+#         Returns a list with the original image and mask and augmented versions of them. 
+#         The number of augmented images and masks is equal to the specified augmentation_ratio.
+#         The policy is chosen by the policy argument
+#         """
+#         tf_imgs = []
+#         tf_masks = []
+#         # Data Augmentation
+#         for i in range(augmentation_ratio): 
+#             # Select the policy 
+#             if policy == 'retina':
+#                 aug_policy = RetinaPolicy(crop_dims=[self.crop_size, self.crop_size], brightness=[0.9, 1.1])
+       
+#             # Apply the transformation
+#             tf_image, tf_mask = aug_policy(image, mask) 
+              
+#             # Further process the images and masks
+#             tf_image = self.preprocess(tf_image, self.scale)
+#             tf_mask = self.mask_img2class_mask(tf_mask, self.scale)
+#             tf_image = torch.from_numpy(tf_image).type(torch.FloatTensor)
+#             tf_mask = torch.from_numpy(tf_mask).type(torch.FloatTensor)
+#             tf_imgs.append(tf_image)
+#             tf_masks.append(tf_mask)
+
+#         i, j, h, w = transforms.RandomCrop.get_params(image, [self.crop_size, self.crop_size])
+#         image = transforms.functional.crop(image, i, j, h, w)
+#         mask = transforms.functional.crop(mask, i, j, h, w)
+#         image = self.preprocess(image, self.scale)
+#         mask = self.mask_img2class_mask(mask, self.scale)
+#         image = torch.from_numpy(image).type(torch.FloatTensor)
+#         mask = torch.from_numpy(mask).type(torch.FloatTensor)
+
+#         tf_imgs.insert(0, image)
+#         tf_masks.insert(0, mask)
+
+#         return (tf_imgs, tf_masks)
+
+#     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
+#         r"""
+#         Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
+#         """
+#         idx = self.ids[i]
+        
+#         # --- FIXED: Use os.path.join ---
+#         mask_glob = os.path.join(self.masks_dir, idx.replace('training', 'manual1') + '.*')
+#         img_glob = os.path.join(self.imgs_dir, idx + '.*')
+
+#         mask_file = glob(mask_glob)
+#         img_file = glob(img_glob)
+#         # -------------------------------
+
+#         assert len(mask_file) == 1, \
+#             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
+#         assert len(img_file) == 1, \
+#             f'Either no image or multiple images found for the ID {idx}: {img_file}'
+#         mask = Image.open(mask_file[0])
+#         image = Image.open(img_file[0])
+        
+#         # --- FIX: Ensure image is RGB ---
+#         if image.mode != 'RGB':
+#             image = image.convert('RGB')
+#         # --------------------------------
+        
+#         assert image.size == mask.size, \
+#             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
+
+#         images, masks = self.augment(image, mask, policy = self.policy, augmentation_ratio = self.augmentation_ratio)
+#         return {
+#             'image': images,
+#             'mask': masks
+#         }
+
+# class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
+#     r"""
+#     Implements a dataset for the Coronary Artery Segmentation task, with mappings between grayscale image values to class \
+#     indices, grayscale image values to RGB image values, and methods for the necessary conversions.
+
+#     Args:
+#         imgs_dir (str): path to the directory containing the images to be segmented.
+#         masks_dir (str): path to the directory containing the segmentation ground truths.
+#         scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
+#         mask_suffix (str, optional): suffix to be added to an image's filename to obtain its ground truth filename.
+#         augmentation_ratio (int, optional): number of augmentations to generate per image.
+#         aug_policy (str, optional): data augmentation policy.
+#     """
+
+#     # Maps maks grayscale value to mask class index
+#     gray2class_mapping = {
+#         0: 0,
+#         100: 1,
+#         255: 2
+#     }
+
+#     # Maps mask grayscale value to mask RGB value
+#     gray2rgb_mapping = {
+#         0: (0, 0, 0),
+#         100: (255, 0, 0),
+#         255: (255, 255, 255)
+#     }
+#     rgb2class_mapping = {
+#         (0, 0, 0): 0,
+#         (255, 0, 0): 1,
+#         (255, 255, 255): 2
+#     }
+
+#     # Total number of classes, including the background class
+#     n_classes = 3
+
+#     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = 'a', augmentation_ratio: int = 0, aug_policy: str = 'coronary'):
+#         super().__init__(imgs_dir, masks_dir, scale, mask_suffix)
+#         self.augmentation_ratio = augmentation_ratio
+#         self.policy = aug_policy
+
+#     @classmethod
+#     def mask_img2class_mask(cls, pil_mask: Image, scale: float) -> np.array:
+#         r"""
+#         Preprocesses a grayscale `Image` containing a segmentation mask, rescaling it, converting its grayscale values \
+#         to class indices and returning it as a NumPy array in the CHW format.
+
+#         Args:
+#             pil_imgs (Image): object of class `Image` to be preprocessed.
+#             scale (float): image scale, between 0 and 1.
+#         """
+#         w, h = pil_mask.size
+#         newW, newH = int(scale * w), int(scale * h)
+#         assert newW > 0 and newH > 0, 'Scale is too small'
+#         pil_mask = pil_mask.resize((newW, newH))
+
+#         if pil_mask.mode != "L":
+#             pil_mask = pil_mask.convert(mode="L")
+#         mask_nd = np.array(pil_mask)
+
+#         if len(mask_nd.shape) == 2:
+#             mask_nd = np.expand_dims(mask_nd, axis=2)
+
+#         # HWC to CHW
+#         mask = mask_nd.transpose((2, 0, 1))
+#         mask = mask / 255
+#         mask = mask * 2
+#         mask = np.around(mask)
+
+#         return mask
+
+#     @classmethod
+#     def mask2one_hot(cls, mask_tensor: torch.LongTensor, output_shape: str = 'NHWC') -> torch.Tensor:
+#         r"""
+#         Returns the received `FloatTensor` in the N1HW shape to a one hot encoded `LongTensor` in the NHWC shape.\
+#             Can return in NCHW shape is specified.
+
+#         Args:
+#             mask_tensor (LongTensor): N1HW LongTensor to be one-hot encoded.
+#             output_shape (str): NHWC or NCHW.
+#         """
+#         assert output_shape == 'NHWC' or output_shape == 'NCHW', 'Invalid output shape specified'
+
+#         # Assuming tensor in NCHW = N1HW shape
+#         if output_shape == 'NHWC':
+#             return F.one_hot(mask_tensor, cls.n_classes).squeeze(1)
+#         # Assuming tensor in N1HW shape
+#         elif output_shape == 'NCHW':
+#             return torch.transpose(torch.transpose(F.one_hot(mask_tensor, cls.n_classes), 2, 3), 1, 2)
+    
+#     @classmethod
+#     def one_hot2mask(cls, one_hot_mask: torch.FloatTensor, shape: str = 'CHW') -> np.array:
+#         r"""
+#         Returns the one-channel mask (1HW) corresponding to the CHW one-hot encoded one.
+#         """
+#         # Assuming tensor in CHW shape
+#         if shape == 'CHW':
+#             return np.argmax(one_hot_mask.detach().numpy(), axis=0)
+#         elif shape == 'NCHW':
+#             return np.argmax(one_hot_mask.detach().numpy(), axis=1)
+#         return np.argmax(one_hot_mask.detach().numpy(), axis=0)
+    
+#     @classmethod
+#     def class2gray(cls, mask: np.array) -> np.array:
+#         r"""
+#         Replaces the class labels in a numpy array represented mask by their grayscale values, according to `gray2class_mapping`.
+#         """
+#         assert len(cls.gray2class_mapping) == cls.n_classes, \
+#             f'Number of class mappings - {len(cls.gray2class_mapping)} - should be the same as the number of classes - {cls.n_classes}'
+#         for color, label in cls.gray2class_mapping.items():
+#             mask[mask == label] = color
+#         return mask
+    
+#     @classmethod 
+#     def gray2rgb(cls, img: Image) -> Image:
+#         r"""
+#         Converts a grayscale image into an RGB one, according to gray2rgb_mapping.
+#         """
+#         rgb_img = Image.new("RGB", img.size)
+#         for x in range(img.size[0]):
+#             for y in range(img.size[1]):
+#                 rgb_img.putpixel((x, y), cls.gray2rgb_mapping[img.getpixel((x, y))])
+#         return rgb_img
+
+#     @classmethod
+#     def mask2image(cls, mask: np.array) -> Image:
+#         r"""
+#         Converts a one-channel mask (1HW) with class indices into an RGB image, according to gray2class_mapping and gray2rgb_mapping.
+#         """
+#         return cls.gray2rgb(Image.fromarray(cls.class2gray(mask).astype(np.uint8)))
+
+#     def augment(self, image, mask, policy = 'coronary', augmentation_ratio = 0):
+#         """
+#         Returns a list with the original image and mask and augmented versions of them. 
+#         The number of augmented images and masks is equal to the specified augmentation_ratio.
+#         The policy is chosen by the policy argument
+#         """
+#         tf_imgs = []
+#         tf_masks = []
+#         # Data Augmentation
+#         for i in range(augmentation_ratio): 
+#             # Select the policy 
+#             if policy == 'coronary':
+#                 aug_policy = CoronaryPolicy()
+#             elif policy == 'retina':
+#                 aug_policy = RetinaPolicy()
+#             elif policy == 'tnet':
+#                 aug_policy = TNetPolicy()
+       
+#             # Apply the transformation
+#             tf_image, tf_mask = aug_policy(image, mask) 
+              
+#             # Further process the images and masks
+#             tf_image = self.preprocess(tf_image, self.scale)
+#             tf_mask = self.mask_img2class_mask(tf_mask, self.scale)
+#             tf_image = torch.from_numpy(tf_image).type(torch.FloatTensor)
+#             tf_mask = torch.from_numpy(tf_mask).type(torch.FloatTensor)
+#             tf_imgs.append(tf_image)
+#             tf_masks.append(tf_mask)
+
+#         image = self.preprocess(image, self.scale)
+#         mask = self.mask_img2class_mask(mask, self.scale)
+#         image = torch.from_numpy(image).type(torch.FloatTensor)
+#         mask = torch.from_numpy(mask).type(torch.FloatTensor)
+
+#         tf_imgs.insert(0, image)
+#         tf_masks.insert(0, mask)
+
+#         return (tf_imgs, tf_masks)
+
+#     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
+#         r"""
+#         Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
+#         """
+#         idx = self.ids[i]
+        
+#         # --- FIXED: Use os.path.join ---
+#         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
+#         img_glob = os.path.join(self.imgs_dir, idx + '.*')
+
+#         mask_file = glob(mask_glob)
+#         img_file = glob(img_glob)
+#         # -------------------------------
+
+#         assert len(mask_file) == 1, \
+#             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
+#         assert len(img_file) == 1, \
+#             f'Either no image or multiple images found for the ID {idx}: {img_file}'
+#         mask = Image.open(mask_file[0])
+        
+#         if mask.mode != 'L':
+#             mask = mask.convert(mode='L')
+#         image = Image.open(img_file[0])
+        
+#         # --- FIX: Ensure image is RGB ---
+#         if image.mode != 'RGB':
+#             image = image.convert('RGB')
+#         # --------------------------------
+        
+#         assert image.size == mask.size, \
+#             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
+
+#         images, masks = self.augment(image, mask, policy = self.policy, augmentation_ratio = self.augmentation_ratio)
+#         return {
+#             'image': images,
+#             'mask': masks
+#         }
+
+# ############For Tvesky Loss
 from os.path import splitext
 from os import listdir
 import os
@@ -15,6 +702,7 @@ from utils.augment import *
 import math
 import torchvision.transforms.functional as TF
 import random
+import cv2  # --- IMPORTED OPENCV FOR DILATION ---
 
 class PatchSegmentationDataset(Dataset):
     def __init__(self, imgs_dir: str, masks_dir: str, patch_size: int = 256, stride: int = 128, mask_suffix: str = '', is_train: bool = True):
@@ -27,13 +715,11 @@ class PatchSegmentationDataset(Dataset):
         
         self.ids = [splitext(file)[0] for file in listdir(imgs_dir) if not file.startswith('.')]
         
-        # Calculate coordinates to ensure full overlapping coverage for every image
         self.patches = []
         for idx in self.ids:
             img_glob = os.path.join(self.imgs_dir, idx + '.*')
             img_file = glob(img_glob)[0]
             
-            # We open the image just to read its size (this is very fast in PIL)
             with Image.open(img_file) as img:
                 w, h = img.size
             
@@ -42,7 +728,6 @@ class PatchSegmentationDataset(Dataset):
             
             for y_idx in range(y_steps):
                 for x_idx in range(x_steps):
-                    # Ensure we don't go out of bounds (pulls the last patch backwards if needed)
                     y_start = min(y_idx * self.stride, max(0, h - self.patch_size))
                     x_start = min(x_idx * self.stride, max(0, w - self.patch_size))
                     self.patches.append((idx, y_start, x_start))
@@ -65,7 +750,6 @@ class PatchSegmentationDataset(Dataset):
         mask = Image.open(mask_file).convert('L')
         img = Image.open(img_file).convert('RGB')
         
-        # Safety pad: in case any original image is actually smaller than 256x256
         w, h = img.size
         pad_w = max(0, self.patch_size - w)
         pad_h = max(0, self.patch_size - h)
@@ -73,11 +757,9 @@ class PatchSegmentationDataset(Dataset):
             img = TF.pad(img, (0, 0, pad_w, pad_h))
             mask = TF.pad(mask, (0, 0, pad_w, pad_h))
         
-        # Crop the exact overlapping patch
         img_patch = img.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
         mask_patch = mask.crop((x_start, y_start, x_start + self.patch_size, y_start + self.patch_size))
         
-        # Apply standard Augmentations during Training
         if self.is_train:
             if random.random() > 0.5:
                 img_patch = TF.hflip(img_patch)
@@ -86,10 +768,10 @@ class PatchSegmentationDataset(Dataset):
                 img_patch = TF.vflip(img_patch)
                 mask_patch = TF.vflip(mask_patch)
             if random.random() > 0.3:
+                import torchvision.transforms as transforms
                 color_tf = transforms.ColorJitter(brightness=0.2, contrast=0.2)
                 img_patch = color_tf(img_patch)
         
-        # Convert to Tensors
         img_nd = np.array(img_patch).transpose((2, 0, 1))
         img_trans = (img_nd / 255.0).astype(np.float32)
         
@@ -101,115 +783,7 @@ class PatchSegmentationDataset(Dataset):
             'mask': torch.from_numpy(mask_trans).unsqueeze(0) 
         }
 
-r"""
-Defines the `BasicSegmentationDataset` and `CoronaryArterySegmentationDatasets`, which extend the `Dataset` and `BasicSegmentationDataset` \ 
-classes, respectively. Each class defines the specific methods needed for data processing and a method :func:`__getitem__` to return samples.
-"""
-
-# class BasicSegmentationDataset(Dataset):
-#     r"""
-#     Implements a basic dataset for segmentation tasks, with methods for image and mask scaling and normalization. \
-#     The filenames of the segmentation ground truths must be equal to the filenames of the images to be segmented, \
-#     except for a possible suffix.
-
-#     Args:
-#         imgs_dir (str): path to the directory containing the images to be segmented.
-#         masks_dir (str): path to the directory containing the segmentation ground truths.
-#         scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
-#         mask_suffix (str, optional): suffix to be added to an image's filename to obtain its 
-#             ground truth filename.
-#     """
-
-#     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = ''):
-#         self.imgs_dir = imgs_dir
-#         self.masks_dir = masks_dir
-#         self.scale = scale
-#         self.mask_suffix = mask_suffix
-#         assert 0 < scale <= 1, 'Scale must be between 0 and 1'
-
-#         self.ids = [splitext(file)[0] for file in listdir(imgs_dir)
-#                     if not file.startswith('.')]
-#         logging.info(f'Creating dataset with {len(self.ids)} examples')
-
-#     def __len__(self) -> int:
-#         r"""
-#         Returns the size of the dataset.
-#         """
-#         return len(self.ids)
-
-#     @classmethod
-#     def preprocess(cls, pil_img: Image, scale: float) -> Image:
-#         r"""
-#         Preprocesses an `Image`, rescaling it and returning it as a NumPy array in 
-#         the CHW format.
-
-#         Args:
-#             pil_imgs (Image): object of class `Image` to be preprocessed.
-#             scale (float): image scale, between 0 and 1.
-#         """
-#         w, h = pil_img.size
-#         newW, newH = int(scale * w), int(scale * h)
-        
-#         # FIX: Force dimensions to be multiples of 32 to prevent feature map size mismatch in U-Net
-#         newW = int(round(newW / 32) * 32)
-#         newH = int(round(newH / 32) * 32)
-        
-#         # Safety check to prevent 0x0 images
-#         if newW < 32: newW = 32
-#         if newH < 32: newH = 32
-        
-#         pil_img = pil_img.resize((newW, newH))
-
-#         img_nd = np.array(pil_img)
-
-#         if len(img_nd.shape) == 2:
-#             img_nd = np.expand_dims(img_nd, axis=2)
-
-#         # HWC to CHW
-#         img_trans = img_nd.transpose((2, 0, 1))
-#         if img_trans.max() > 1:
-#             img_trans = (img_trans / 255).astype(np.float32)
-
-#         return img_trans
-
-#     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
-#         r"""
-#         Returns two tensors: an image and the corresponding mask. 
-#         """
-#         idx = self.ids[i]
-        
-#         # Safe path construction
-#         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
-#         img_glob = os.path.join(self.imgs_dir, idx + '.*')
-        
-#         mask_file = glob(mask_glob)
-#         img_file = glob(img_glob)
-
-#         assert len(mask_file) == 1, \
-#             f'Either no mask or multiple masks found for the ID {idx}: {mask_file} (Searched: {mask_glob})'
-#         assert len(img_file) == 1, \
-#             f'Either no image or multiple images found for the ID {idx}: {img_file} (Searched: {img_glob})'
-#         mask = Image.open(mask_file[0])
-#         img = Image.open(img_file[0])
-        
-#         # --- FIX: Ensure image is RGB (3 channels) ---
-#         if img.mode != 'RGB':
-#             img = img.convert('RGB')
-#         # ---------------------------------------------
-
-#         assert img.size == mask.size, \
-#             f'Image and mask {idx} should be the same size, but are {img.size} and {mask.size}'
-
-#         img = self.preprocess(img, self.scale)
-#         mask = self.preprocess(mask, self.scale)
-
-#         return {
-#             'image': [torch.from_numpy(img).type(torch.FloatTensor)],
-#             'mask': [torch.from_numpy(mask).type(torch.FloatTensor)]
-#         }
-
 class BasicSegmentationDataset(Dataset):
-    # Notice we added augmentation_ratio and aug_policy here to fix your error
     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = '', augmentation_ratio: int = 0, aug_policy: str = None):
         self.imgs_dir = imgs_dir
         self.masks_dir = masks_dir
@@ -234,6 +808,15 @@ class BasicSegmentationDataset(Dataset):
         
         mask = Image.open(mask_file).convert('L')
         img = Image.open(img_file).convert('RGB')
+
+        # --- MODIFIED: MORPHOLOGICAL DILATION TO THICKEN DOTS ---
+        # Only do this if it's the training set (policy == 'crop') to avoid cheating on metrics
+        if self.policy == 'crop':
+            mask_np = np.array(mask)
+            kernel = np.ones((3, 3), np.uint8) # 3x3 kernel expands white dots by 1 pixel in all directions
+            mask_np = cv2.dilate(mask_np, kernel, iterations=1)
+            mask = Image.fromarray(mask_np)
+        # ---------------------------------------------------------
         
         # --- PHASE 1: TRAINING (Random 256x256 Patches + Augmentation) ---
         if self.policy == 'crop':
@@ -261,7 +844,7 @@ class BasicSegmentationDataset(Dataset):
                 img = transforms.functional.gaussian_blur(img, kernel_size=[3, 3])
 
         else:
-            # --- PHASE 2: VALIDATION (Full 480x640 Image) ---
+            # --- PHASE 2: VALIDATION (Full Image) ---
             if self.scale != 1:
                 target_size = (int(img.size[0] * self.scale), int(img.size[1] * self.scale))
                 img = img.resize(target_size, Image.BILINEAR)
@@ -280,27 +863,13 @@ class BasicSegmentationDataset(Dataset):
         }
 
 class RetinaSegmentationDataset(BasicSegmentationDataset):
-    r"""
-    Implements a dataset for the Retinal Vessel Segmentation task
-
-    Args:
-        imgs_dir (str): path to the directory containing the images to be segmented.
-        masks_dir (str): path to the directory containing the segmentation ground truths.
-        scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
-        augmentation_ratio (int, optional): number of augmentations to generate per image.
-        crop_size (int, optional): size of the square image to be fed to the model.
-        aug_policy (str, optional): data augmentation policy.
-    """
-    # Number of classes, including the background class
     n_classes = 2
 
-    # Maps maks grayscale value to mask class index
     gray2class_mapping = {
         0: 0,
         255: 1
     }
 
-    # Maps mask grayscale value to mask RGB value
     gray2rgb_mapping = {
         0: (0, 0, 0),
         255: (255, 255, 255)
@@ -318,14 +887,6 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask_img2class_mask(cls, pil_mask: Image, scale: float) -> np.array:
-        r"""
-        Preprocesses a grayscale `Image` containing a segmentation mask, rescaling it, converting its grayscale values \
-        to class indices and returning it as a NumPy array in the CHW format.
-
-        Args:
-            pil_imgs (Image): object of class `Image` to be preprocessed.
-            scale (float): image scale, between 0 and 1.
-        """
         w, h = pil_mask.size
         newW, newH = int(scale * w), int(scale * h)
         assert newW > 0 and newH > 0, 'Scale is too small'
@@ -338,7 +899,6 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
         if len(mask_nd.shape) == 2:
             mask_nd = np.expand_dims(mask_nd, axis=2)
 
-        # HWC to CHW
         mask = mask_nd.transpose((2, 0, 1))
         mask = mask / 255
 
@@ -346,10 +906,6 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def one_hot2mask(cls, one_hot_mask: torch.FloatTensor, shape: str = 'CHW') -> np.array:
-        r"""
-        Returns the one-channel mask (1HW) corresponding to the CHW one-hot encoded one.
-        """
-        # Assuming tensor in CHW shape
         if shape == 'CHW':
             return np.argmax(one_hot_mask.detach().numpy(), axis=0)
         elif shape == 'NCHW':
@@ -358,28 +914,15 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask2one_hot(cls, mask_tensor: torch.FloatTensor, output_shape: str = 'NHWC') -> torch.Tensor:
-        r"""
-        Returns the received `FloatTensor` in the N1HW shape to a one hot encoded `LongTensor` in the NHWC shape.\
-            Can return in NCHW shape is specified.
-
-        Args:
-            mask_tensor (FloatTensor): N1HW FloatTensor to be one-hot encoded.
-            output_shape (str): NHWC or NCHW.
-        """
         assert output_shape == 'NHWC' or output_shape == 'NCHW', 'Invalid output shape specified'
 
-        # Assuming tensor in NCHW = N1HW shape
         if output_shape == 'NHWC':
             return F.one_hot(mask_tensor, cls.n_classes).squeeze(1)
-        # Assuming tensor in N1HW shape
         elif output_shape == 'NCHW':
             return torch.transpose(torch.transpose(F.one_hot(mask_tensor, cls.n_classes), 2, 3), 1, 2)
 
     @classmethod
     def class2gray(cls, mask: np.array) -> np.array:
-        r"""
-        Replaces the class labels in a numpy array represented mask by their grayscale values, according to `gray2class_mapping`.
-        """
         assert len(cls.gray2class_mapping) == cls.n_classes, \
             f'Number of class mappings - {len(cls.gray2class_mapping)} - should be the same as the number of classes - {cls.n_classes}'
         for color, label in cls.gray2class_mapping.items():
@@ -388,9 +931,6 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
     
     @classmethod 
     def gray2rgb(cls, img: Image) -> Image:
-        r"""
-        Converts a grayscale image into an RGB one, according to gray2rgb_mapping.
-        """
         rgb_img = Image.new("RGB", img.size)
         for x in range(img.size[0]):
             for y in range(img.size[1]):
@@ -399,29 +939,18 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask2image(cls, mask: np.array) -> Image:
-        r"""
-        Converts a one-channel mask (1HW) with class indices into an RGB image, according to gray2class_mapping and gray2rgb_mapping.
-        """
         return cls.gray2rgb(Image.fromarray(cls.class2gray(mask).astype(np.uint8)))
 
     def augment(self, image, mask, policy = 'retina', augmentation_ratio = 0):
-        """
-        Returns a list with the original image and mask and augmented versions of them. 
-        The number of augmented images and masks is equal to the specified augmentation_ratio.
-        The policy is chosen by the policy argument
-        """
+        import torchvision.transforms as transforms
         tf_imgs = []
         tf_masks = []
-        # Data Augmentation
         for i in range(augmentation_ratio): 
-            # Select the policy 
             if policy == 'retina':
                 aug_policy = RetinaPolicy(crop_dims=[self.crop_size, self.crop_size], brightness=[0.9, 1.1])
        
-            # Apply the transformation
             tf_image, tf_mask = aug_policy(image, mask) 
               
-            # Further process the images and masks
             tf_image = self.preprocess(tf_image, self.scale)
             tf_mask = self.mask_img2class_mask(tf_mask, self.scale)
             tf_image = torch.from_numpy(tf_image).type(torch.FloatTensor)
@@ -443,18 +972,13 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
         return (tf_imgs, tf_masks)
 
     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
-        r"""
-        Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
-        """
         idx = self.ids[i]
         
-        # --- FIXED: Use os.path.join ---
         mask_glob = os.path.join(self.masks_dir, idx.replace('training', 'manual1') + '.*')
         img_glob = os.path.join(self.imgs_dir, idx + '.*')
 
         mask_file = glob(mask_glob)
         img_file = glob(img_glob)
-        # -------------------------------
 
         assert len(mask_file) == 1, \
             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
@@ -463,10 +987,8 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
         mask = Image.open(mask_file[0])
         image = Image.open(img_file[0])
         
-        # --- FIX: Ensure image is RGB ---
         if image.mode != 'RGB':
             image = image.convert('RGB')
-        # --------------------------------
         
         assert image.size == mask.size, \
             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
@@ -478,27 +1000,12 @@ class RetinaSegmentationDataset(BasicSegmentationDataset):
         }
 
 class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
-    r"""
-    Implements a dataset for the Coronary Artery Segmentation task, with mappings between grayscale image values to class \
-    indices, grayscale image values to RGB image values, and methods for the necessary conversions.
-
-    Args:
-        imgs_dir (str): path to the directory containing the images to be segmented.
-        masks_dir (str): path to the directory containing the segmentation ground truths.
-        scale (float, optional): image scale, between 0 and 1, to be used in the segmentation.
-        mask_suffix (str, optional): suffix to be added to an image's filename to obtain its ground truth filename.
-        augmentation_ratio (int, optional): number of augmentations to generate per image.
-        aug_policy (str, optional): data augmentation policy.
-    """
-
-    # Maps maks grayscale value to mask class index
     gray2class_mapping = {
         0: 0,
         100: 1,
         255: 2
     }
 
-    # Maps mask grayscale value to mask RGB value
     gray2rgb_mapping = {
         0: (0, 0, 0),
         100: (255, 0, 0),
@@ -510,7 +1017,6 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
         (255, 255, 255): 2
     }
 
-    # Total number of classes, including the background class
     n_classes = 3
 
     def __init__(self, imgs_dir: str, masks_dir: str, scale: float = 1, mask_suffix: str = 'a', augmentation_ratio: int = 0, aug_policy: str = 'coronary'):
@@ -520,14 +1026,6 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask_img2class_mask(cls, pil_mask: Image, scale: float) -> np.array:
-        r"""
-        Preprocesses a grayscale `Image` containing a segmentation mask, rescaling it, converting its grayscale values \
-        to class indices and returning it as a NumPy array in the CHW format.
-
-        Args:
-            pil_imgs (Image): object of class `Image` to be preprocessed.
-            scale (float): image scale, between 0 and 1.
-        """
         w, h = pil_mask.size
         newW, newH = int(scale * w), int(scale * h)
         assert newW > 0 and newH > 0, 'Scale is too small'
@@ -540,7 +1038,6 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
         if len(mask_nd.shape) == 2:
             mask_nd = np.expand_dims(mask_nd, axis=2)
 
-        # HWC to CHW
         mask = mask_nd.transpose((2, 0, 1))
         mask = mask / 255
         mask = mask * 2
@@ -550,29 +1047,15 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask2one_hot(cls, mask_tensor: torch.LongTensor, output_shape: str = 'NHWC') -> torch.Tensor:
-        r"""
-        Returns the received `FloatTensor` in the N1HW shape to a one hot encoded `LongTensor` in the NHWC shape.\
-            Can return in NCHW shape is specified.
-
-        Args:
-            mask_tensor (LongTensor): N1HW LongTensor to be one-hot encoded.
-            output_shape (str): NHWC or NCHW.
-        """
         assert output_shape == 'NHWC' or output_shape == 'NCHW', 'Invalid output shape specified'
 
-        # Assuming tensor in NCHW = N1HW shape
         if output_shape == 'NHWC':
             return F.one_hot(mask_tensor, cls.n_classes).squeeze(1)
-        # Assuming tensor in N1HW shape
         elif output_shape == 'NCHW':
             return torch.transpose(torch.transpose(F.one_hot(mask_tensor, cls.n_classes), 2, 3), 1, 2)
     
     @classmethod
     def one_hot2mask(cls, one_hot_mask: torch.FloatTensor, shape: str = 'CHW') -> np.array:
-        r"""
-        Returns the one-channel mask (1HW) corresponding to the CHW one-hot encoded one.
-        """
-        # Assuming tensor in CHW shape
         if shape == 'CHW':
             return np.argmax(one_hot_mask.detach().numpy(), axis=0)
         elif shape == 'NCHW':
@@ -581,9 +1064,6 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
     
     @classmethod
     def class2gray(cls, mask: np.array) -> np.array:
-        r"""
-        Replaces the class labels in a numpy array represented mask by their grayscale values, according to `gray2class_mapping`.
-        """
         assert len(cls.gray2class_mapping) == cls.n_classes, \
             f'Number of class mappings - {len(cls.gray2class_mapping)} - should be the same as the number of classes - {cls.n_classes}'
         for color, label in cls.gray2class_mapping.items():
@@ -592,9 +1072,6 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
     
     @classmethod 
     def gray2rgb(cls, img: Image) -> Image:
-        r"""
-        Converts a grayscale image into an RGB one, according to gray2rgb_mapping.
-        """
         rgb_img = Image.new("RGB", img.size)
         for x in range(img.size[0]):
             for y in range(img.size[1]):
@@ -603,22 +1080,12 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
 
     @classmethod
     def mask2image(cls, mask: np.array) -> Image:
-        r"""
-        Converts a one-channel mask (1HW) with class indices into an RGB image, according to gray2class_mapping and gray2rgb_mapping.
-        """
         return cls.gray2rgb(Image.fromarray(cls.class2gray(mask).astype(np.uint8)))
 
     def augment(self, image, mask, policy = 'coronary', augmentation_ratio = 0):
-        """
-        Returns a list with the original image and mask and augmented versions of them. 
-        The number of augmented images and masks is equal to the specified augmentation_ratio.
-        The policy is chosen by the policy argument
-        """
         tf_imgs = []
         tf_masks = []
-        # Data Augmentation
         for i in range(augmentation_ratio): 
-            # Select the policy 
             if policy == 'coronary':
                 aug_policy = CoronaryPolicy()
             elif policy == 'retina':
@@ -626,10 +1093,8 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
             elif policy == 'tnet':
                 aug_policy = TNetPolicy()
        
-            # Apply the transformation
             tf_image, tf_mask = aug_policy(image, mask) 
               
-            # Further process the images and masks
             tf_image = self.preprocess(tf_image, self.scale)
             tf_mask = self.mask_img2class_mask(tf_mask, self.scale)
             tf_image = torch.from_numpy(tf_image).type(torch.FloatTensor)
@@ -648,18 +1113,13 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
         return (tf_imgs, tf_masks)
 
     def __getitem__(self, i) -> Dict[List[torch.FloatTensor], List[torch.FloatTensor]]:
-        r"""
-        Returns two tensors: an image, of shape 1HW, and the corresponding mask, of shape CHW. 
-        """
         idx = self.ids[i]
         
-        # --- FIXED: Use os.path.join ---
         mask_glob = os.path.join(self.masks_dir, idx + self.mask_suffix + '.*')
         img_glob = os.path.join(self.imgs_dir, idx + '.*')
 
         mask_file = glob(mask_glob)
         img_file = glob(img_glob)
-        # -------------------------------
 
         assert len(mask_file) == 1, \
             f'Either no mask or multiple masks found for the ID {idx}: {mask_file}'
@@ -671,10 +1131,8 @@ class CoronaryArterySegmentationDataset(BasicSegmentationDataset):
             mask = mask.convert(mode='L')
         image = Image.open(img_file[0])
         
-        # --- FIX: Ensure image is RGB ---
         if image.mode != 'RGB':
             image = image.convert('RGB')
-        # --------------------------------
         
         assert image.size == mask.size, \
             f'Image and mask {idx} should be the same size, but are {image.size} and {mask.size}'        
