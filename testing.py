@@ -20,9 +20,9 @@ except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'checkpoints\CP_best.pth' 
+MODEL_PATH = 'ca_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_patch_3"
+MAIN_OUTPUT_DIR = r"D:\ca_b0"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]

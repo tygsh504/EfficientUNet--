@@ -19,15 +19,15 @@ except ImportError:
     import segmentation_models_pytorch as smp
 
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'checkpoints\CP_best.pth' 
+MODEL_PATH = 'b1_best.pth' 
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Paddy_Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0\b0_patch_3"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b1"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
 
 # Model Config
-ENCODER_NAME = 'timm-efficientnet-b0'
+ENCODER_NAME = 'timm-efficientnet-b1'
 NUM_CLASSES = 1         
 INPUT_SHAPE = [640, 480] # [Height, Width]
 PATCH_SIZE = (256, 256)  # Sliding Window Size
