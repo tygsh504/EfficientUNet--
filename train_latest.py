@@ -14,7 +14,7 @@ from eval import eval_net
 from torch.utils.tensorboard import SummaryWriter
 from utils.dataset import CoronaryArterySegmentationDataset, RetinaSegmentationDataset, BasicSegmentationDataset
 from torch.utils.data import DataLoader
-from kornia.losses import focal_loss
+from kornia.losses import focal_loss, binary_focal_loss_with_logits
 
 import segmentation_models_pytorch.segmentation_models_pytorch as smp
 import pandas as pd
@@ -51,7 +51,7 @@ def train_net(net,
     n_train = len(train)
     n_val = len(val)
     
-    # Reduced num_workers to 2 for Windows compatibility
+    # Reduced num_workers to 0 for Windows compatibility
     train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
@@ -77,10 +77,10 @@ def train_net(net,
     ''')
 
     optimizer = optim.Adam(net.parameters(), lr=lr)
-    # Use ReduceLROnPlateau to lower LR when validation loss stops improving
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, verbose=True)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
-    best_val_loss = float('inf')
+    
+    # --- CHANGED: Track Best Dice Score instead of Lowest Loss ---
+    best_val_dice = 0.0
 
     # Initialize GradScaler for AMP using modern API
     scaler = torch.amp.GradScaler('cuda')
@@ -120,9 +120,6 @@ def train_net(net,
             for batch in train_loader:
                 imgs = batch['image']
                 true_masks = batch['mask']
-                
-                # imgs = torch.cat(imgs, dim = 0)
-                # true_masks = torch.cat(true_masks, dim = 0)
 
                 assert imgs.shape[1] == n_channels, \
                     f'Network has been defined with {n_channels} input channels, ' \
@@ -139,11 +136,8 @@ def train_net(net,
                     masks_pred = net(imgs)                         
                     
                     if n_classes == 1:
-                        bce_loss = nn.BCEWithLogitsLoss()
-                        # Weighting the losses: 30% BCE, 70% Dice to prioritize overlap
-                        loss = 0.3 * bce_loss(masks_pred, true_masks)
-                        # Use Focal Loss instead of BCE to tackle severe class imbalance and hard boundary pixels
-                        # loss = focal_loss(masks_pred, true_masks, alpha=0.25, gamma=2.0, reduction='mean').unsqueeze(0)
+                        # --- CHANGED: Use Focal Loss instead of BCE to tackle class imbalance ---
+                        loss = binary_focal_loss_with_logits(masks_pred, true_masks, alpha=0.25, gamma=2.0, reduction='mean').unsqueeze(0)
                         loss += 0.7 * dice_loss(masks_pred, true_masks).mean()
 
                         # Calculate metrics for the batch
@@ -251,11 +245,12 @@ def train_net(net,
         if 'iou' in val_metrics:
             writer.add_scalar('IoU/test', val_metrics['iou'], global_step)
 
-        # Save Best Checkpoint
-        if save_cp and val_score < best_val_loss:
-            best_val_loss = val_score
+        # --- CHANGED: Save Best Checkpoint based on Validation Dice ---
+        current_val_dice = history['val_dice'][-1]
+        if save_cp and current_val_dice > best_val_dice:
+            best_val_dice = current_val_dice
             torch.save(net.state_dict(), os.path.join(dir_checkpoint, 'CP_best.pth'))
-            logging.info(f'New best checkpoint saved! Loss: {best_val_loss:.4f}')
+            logging.info(f'New best checkpoint saved! Val Dice: {best_val_dice:.4f}')
 
         # Save Last Checkpoint
         if save_cp:
@@ -321,7 +316,7 @@ def get_args():
     parser.add_argument('-vm', '--validation-masks-dir', type=str, default=None, help='Validation masks directory', dest='val_mask_dir')
     parser.add_argument('-enc', '--encoder', metavar='ENC', type=str, default='timm-efficientnet-b0', help='Encoder to be used', dest='encoder')
     parser.add_argument('-e', '--epochs', metavar='E', type=int, default=150, help='Number of epochs', dest='epochs')
-    # CHANGED: Default batch size set to 2
+    # Default batch size set to 2
     parser.add_argument('-b', '--batch-size', metavar='B', type=int, nargs='?', default=2, help='Batch size', dest='batchsize')
     parser.add_argument('-l', '--learning-rate', metavar='LR', type=float, nargs='?', default=0.001, help='Learning rate', dest='lr')
     parser.add_argument('-f', '--load', type=str, default=False, help='Load model from a .pth file', dest='load')
@@ -341,13 +336,12 @@ if __name__ == '__main__':
         n_classes = 2
     elif args.dataset == 'Coronary':
         n_classes = 3
-    elif args.dataset == 'LeafDisease': #LeafDisease
+    elif args.dataset == 'LeafDisease': 
         n_classes = 1 
     else:
-        n_classes = 1 #
+        n_classes = 1 
 
     # Instantiate EfficientUNet++
-    # net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights=None, in_channels=3, classes=n_classes)
     net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
 
     # --- UNFREEZING STEPS ---
@@ -381,17 +375,21 @@ if __name__ == '__main__':
         validation_set = CoronaryArterySegmentationDataset(args.val_img_dir if args.val_img_dir is not None else 'Coronary/val/imgs/', 
             args.val_mask_dir if args.val_mask_dir is not None else 'Coronary/val/masks/', args.scale, mask_suffix='a')
     elif args.dataset == 'LeafDisease':
+        # --- CHANGED: Added aug_policy='crop' to trigger data augmentation on training ---
         training_set = BasicSegmentationDataset(
             imgs_dir=args.train_img_dir, 
             masks_dir=args.train_mask_dir, 
             scale=args.scale,
-            mask_suffix='' 
+            mask_suffix='',
+            aug_policy='crop',
+            augmentation_ratio=args.augmentation_ratio
         )
         validation_set = BasicSegmentationDataset(
             imgs_dir=args.val_img_dir, 
             masks_dir=args.val_mask_dir, 
             scale=args.scale,
             mask_suffix=''
+            # Validation bypasses aug_policy
         )
     else:
         print("Invalid dataset")
@@ -409,7 +407,7 @@ if __name__ == '__main__':
                   img_scale=args.scale,
                   n_classes=n_classes,
                   n_channels=3,
-                  augmentation_ratio = args.augmentation_ratio)
+                  augmentation_ratio=args.augmentation_ratio)
     except KeyboardInterrupt:
         torch.save(net.state_dict(), 'INTERRUPTED.pth')
         logging.info('Saved interrupt')
