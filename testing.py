@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
@@ -19,10 +20,66 @@ try:
 except ImportError:
     import segmentation_models_pytorch as smp
 
+class SCSEModule(nn.Module):
+    def __init__(self, in_channels, mip):
+        super().__init__()
+        self.cSE = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, mip, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mip, in_channels, 1),
+            nn.Sigmoid(),
+        )
+        self.sSE = nn.Sequential(nn.Conv2d(in_channels, 1, 1), nn.Sigmoid())
+
+    def forward(self, x):
+        return x * self.cSE(x) + x * self.sSE(x)
+
+def patch_model_attention(model, state_dict):
+    scse_prefixes = set()
+    for k in state_dict.keys():
+        if '.cSE.' in k or '.sSE.' in k:
+            prefix = k.split('.cSE.')[0].split('.sSE.')[0]
+            scse_prefixes.add(prefix)
+            
+    if not scse_prefixes:
+        return
+        
+    logging.info(f"Detected SCSE attention in state_dict. Patching {len(scse_prefixes)} modules...")
+    
+    for prefix in scse_prefixes:
+        parts = prefix.split('.')
+        parent = model
+        try:
+            for part in parts[:-1]:
+                if part.isdigit():
+                    parent = parent[int(part)]
+                elif isinstance(parent, nn.ModuleDict):
+                    parent = parent[part]
+                else:
+                    parent = getattr(parent, part)
+            attr_name = parts[-1]
+            
+            sse_weight_key = f"{prefix}.sSE.0.weight"
+            cse_weight_key = f"{prefix}.cSE.1.weight"
+            
+            if sse_weight_key in state_dict and cse_weight_key in state_dict:
+                in_channels = state_dict[sse_weight_key].shape[1]
+                mip = state_dict[cse_weight_key].shape[0]
+                
+                scse = SCSEModule(in_channels, mip)
+                
+                if attr_name.isdigit():
+                    parent[int(attr_name)] = scse
+                else:
+                    setattr(parent, attr_name, scse)
+        except Exception as e:
+            logging.warning(f"Could not patch {prefix}: {e}")
+
 # --- USER CONFIGURATION SECTION ---
-MODEL_PATH = 'checkpoints\CP_best.pth' 
-BASE_DATA_PATH = r"C:\Users\User\Desktop\Testing Dataset"
-MAIN_OUTPUT_DIR = r"D:\b0_newdataset"
+MODEL_PATH = 'CP_best.pth'
+BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset - Copy"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_6"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
@@ -189,6 +246,7 @@ if __name__ == '__main__':
         
         state_dict = torch.load(MODEL_PATH, map_location=device, weights_only=True)
         new_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+        patch_model_attention(net, new_state_dict)
         net.load_state_dict(new_state_dict)
         net.to(device).eval()
         logging.info("Model loaded successfully.")

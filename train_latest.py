@@ -2,6 +2,8 @@ import argparse
 import logging
 import os
 import sys
+import random
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -31,6 +33,53 @@ if 'torch._six' not in sys.modules:
     if not hasattr(torch, '_six'):
         torch._six = dummy_six
 # -----------------------------------------------------
+
+# --- ADDED: SEED FUNCTION FOR REPRODUCIBILITY ---
+def set_seed(seed=42):
+    """Locks all sources of randomness for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if using multi-GPU
+    
+    # Forces cuDNN to be deterministic
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Optional: forces PyTorch to use deterministic algorithms where possible
+    torch.use_deterministic_algorithms(True, warn_only=True)
+# ------------------------------------------------
+
+class SCSEModule(nn.Module):
+    def __init__(self, in_channels, mip):
+        super().__init__()
+        self.cSE = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, mip, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mip, in_channels, 1),
+            nn.Sigmoid(),
+        )
+        self.sSE = nn.Sequential(nn.Conv2d(in_channels, 1, 1), nn.Sigmoid())
+
+    def forward(self, x):
+        return x * self.cSE(x) + x * self.sSE(x)
+
+def replace_attention_with_scse(model):
+    """Recursively replaces Coordinate Attention modules with SCSE modules."""
+    replaced = 0
+    for child_name, child in model.named_children():
+        # Detect Coordinate Attention by checking for its specific sub-layers
+        if hasattr(child, 'conv_h') and hasattr(child, 'conv_w') and hasattr(child, 'conv1'):
+            in_channels = child.conv1.in_channels
+            mip = child.conv1.out_channels
+            scse = SCSEModule(in_channels, mip)
+            setattr(model, child_name, scse)
+            replaced += 1
+        else:
+            replaced += replace_attention_with_scse(child)
+    return replaced
 
 def train_net(net,
               device,
@@ -327,6 +376,10 @@ def get_args():
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    
+    # Set seed for reproducibility
+    set_seed(42)
+
     args = get_args()
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -344,6 +397,10 @@ if __name__ == '__main__':
     # Instantiate EfficientUNet++
     net = smp.EfficientUnetPlusPlus(encoder_name=args.encoder, encoder_weights="imagenet", in_channels=3, classes=n_classes)
 
+    # --- ADDED: FORCE SCSE ATTENTION ---
+    num_replaced = replace_attention_with_scse(net)
+    logging.info(f"Replaced {num_replaced} Coordinate Attention modules with SCSE.")
+    
     # --- UNFREEZING STEPS ---
     # We simply do NOT call net.encoder.eval() or set requires_grad=False.
     # We ensure the network is in training mode.
@@ -354,9 +411,12 @@ if __name__ == '__main__':
         net = nn.DataParallel(net)
 
     if args.load:
-        net.load_state_dict(
-            torch.load(args.load, map_location=device)
-        )
+        state_dict = torch.load(args.load, map_location=device, weights_only=True)
+        # Safely handle DataParallel state dictionary discrepancies
+        state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+        if isinstance(net, nn.DataParallel):
+            state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+        net.load_state_dict(state_dict)
         logging.info(f'Model loaded from {args.load}')
 
     net.to(device=device)
