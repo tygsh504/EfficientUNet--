@@ -192,8 +192,11 @@ def train_net(net,
                     
                     if n_classes == 1:
                         # --- CHANGED: Use Focal Loss instead of BCE to tackle class imbalance ---
-                        loss = binary_focal_loss_with_logits(masks_pred, true_masks, alpha=0.25, gamma=2.0, reduction='mean').unsqueeze(0)
-                        loss += 0.7 * dice_loss(masks_pred, true_masks).mean()
+                        # loss = binary_focal_loss_with_logits(masks_pred, true_masks, alpha=0.25, gamma=2.0, reduction='mean').unsqueeze(0)
+                        # loss += 0.7 * dice_loss(masks_pred, true_masks).mean()
+                        bce_loss = nn.BCEWithLogitsLoss()
+                        loss = bce_loss(masks_pred, true_masks)
+                        loss += dice_loss(masks_pred, true_masks).mean()
 
                         # Calculate metrics for the batch
                         probs = torch.sigmoid(masks_pred)
