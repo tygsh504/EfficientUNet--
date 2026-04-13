@@ -11,7 +11,6 @@ from tqdm import tqdm
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-import torch.amp # Modern AMP namespace
 
 # --- COMPATIBILITY PATCH FOR MODERN PYTORCH (2.0+) ---
 import collections.abc
@@ -25,18 +24,14 @@ if 'torch._six' not in sys.modules:
         torch._six = dummy_six
 # -----------------------------------------------------
 
-# --- IMPORT MODEL ---
-try:
-    import segmentation_models_pytorch.segmentation_models_pytorch as smp
-except ImportError:
-    import segmentation_models_pytorch as smp
+import segmentation_models_pytorch.segmentation_models_pytorch as smp
 
-# =====================================================================
+# ==================================================
 # --- USER CONFIGURATION SECTION ---
-# =====================================================================
-MODEL_PATH = 'checkpoints\CP_best.pth'
+# ==================================================
+MODEL_PATH = 'CP_best.pth'
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset - Copy"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_7"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_9"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
@@ -45,7 +40,43 @@ DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Sp
 ENCODER_NAME = 'timm-efficientnet-b0'
 NUM_CLASSES = 1         
 INPUT_SHAPE = [640, 480] # [Height, Width]
-# =====================================================================
+# ==================================================
+
+# --- CUSTOM SCSE ATTENTION MODULE HACK ---
+class SCSEModule(nn.Module):
+    def __init__(self, in_channels, mip):
+        super().__init__()
+        self.cSE = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, mip, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mip, in_channels, 1),
+            nn.Sigmoid(),
+        )
+        self.sSE = nn.Sequential(nn.Conv2d(in_channels, 1, 1), nn.Sigmoid())
+
+    def forward(self, x):
+        return x * self.cSE(x) + x * self.sSE(x)
+
+def replace_attention_with_scse(model):
+    """Recursively replaces Coordinate Attention modules with SCSE modules."""
+    replaced = 0
+    for child_name, child in model.named_children():
+        # Detect Coordinate Attention by checking for its specific sub-layers
+        if hasattr(child, 'conv_h') and hasattr(child, 'conv_w') and hasattr(child, 'conv1'):
+            in_channels = child.conv1.in_channels
+            
+            # FIX: Force 'mip' to equal 'in_channels' to prevent size mismatch 
+            # with the training checkpoint, bypassing the default reduction ratio.
+            mip = in_channels 
+            
+            scse = SCSEModule(in_channels, mip)
+            setattr(model, child_name, scse)
+            replaced += 1
+        else:
+            replaced += replace_attention_with_scse(child)
+    return replaced
+# -----------------------------------------
 
 def calculate_complexity(model, input_shape, device):
     """Calculates model complexity (params and FLOPs)."""
@@ -55,10 +86,13 @@ def calculate_complexity(model, input_shape, device):
         flops, params = profile(model, inputs=(dummy_input,), verbose=False)
         return params, flops
     except ImportError:
-        logging.warning("Could not import 'thop'. FLOPs and Params will not be calculated.")
+        logging.warning(
+            "Could not import 'thop'. FLOPs and Params will not be calculated. "
+            "Please install it (`pip install thop`) to get these metrics."
+        )
         return 0, 0
     except Exception as e:
-        logging.error(f"Error during complexity calculation: {e}")
+        logging.error(f"An error occurred during complexity calculation: {e}")
         return 0, 0
 
 def calculate_metrics(pred_mask, true_mask):
@@ -137,7 +171,7 @@ def run_test_on_disease(disease_name, net, device, params, flops):
     mask_dir = os.path.join(BASE_DATA_PATH, disease_name, "Infer_GT")
     
     if not os.path.exists(img_dir) or not os.path.exists(mask_dir):
-        logging.warning(f"Skipping {disease_name}: Path not found.")
+        logging.warning(f"Skipping {disease_name}: Path not found ({img_dir}).")
         return None
 
     disease_output_dir = Path(MAIN_OUTPUT_DIR) / disease_name
@@ -149,28 +183,25 @@ def run_test_on_disease(disease_name, net, device, params, flops):
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     results = []
-    
-    net.eval()
     with torch.no_grad():
-        with torch.amp.autocast('cuda' if device.type == 'cuda' else 'cpu'):
-            for batch in tqdm(test_loader, desc=f"Testing {disease_name}"):
-                images = batch['image'].to(device, dtype=torch.float32)
-                true_masks = batch['mask'].to(device, dtype=torch.float32)
-                img_names = batch['name']
+        for batch in tqdm(test_loader, desc=f"Testing {disease_name}"):
+            images = batch['image'].to(device, dtype=torch.float32)
+            true_masks = batch['mask'].to(device, dtype=torch.float32)
+            img_names = batch['name']
 
-                outputs = net(images)
-                
-                if NUM_CLASSES == 1:
-                    probs = torch.sigmoid(outputs)
-                    pred_masks = (probs > 0.5).float()
-                else:
-                    probs = torch.softmax(outputs, dim=1)
-                    pred_masks = torch.argmax(probs, dim=1).unsqueeze(1).float()
+            outputs = net(images)
+            
+            if NUM_CLASSES == 1:
+                probs = torch.sigmoid(outputs)
+                pred_masks = (probs > 0.5).float()
+            else:
+                probs = torch.softmax(outputs, dim=1)
+                pred_masks = torch.argmax(probs, dim=1).unsqueeze(1).float()
 
-                metrics = calculate_metrics(pred_masks[0], true_masks[0])
-                metrics['Filename'] = img_names[0]
-                results.append(metrics)
-                save_visual_result(images[0], true_masks[0], pred_masks[0], img_names[0], metrics['Dice'], img_output_dir)
+            metrics = calculate_metrics(pred_masks[0], true_masks[0])
+            metrics['Filename'] = img_names[0]
+            results.append(metrics)
+            save_visual_result(images[0], true_masks[0], pred_masks[0], img_names[0], metrics['Dice'], img_output_dir)
 
     if results:
         df = pd.DataFrame(results)
@@ -190,8 +221,10 @@ def run_test_on_disease(disease_name, net, device, params, flops):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f"Testing with device: {device}")
 
     try:
+        # 1. Instantiate the model normally
         net = smp.EfficientUnetPlusPlus(
             encoder_name=ENCODER_NAME, 
             encoder_weights=None, 
@@ -199,18 +232,22 @@ if __name__ == '__main__':
             classes=NUM_CLASSES
         )
         
-        # Safely load weights and handle nn.DataParallel "module." prefix from train_latest.py
+        # 2. FORCE SCSE ATTENTION BEFORE LOADING WEIGHTS
+        replaced_count = replace_attention_with_scse(net)
+        logging.info(f"Replaced {replaced_count} attention modules with SCSE.")
+        
+        # 3. Load the saved state dict
         state_dict = torch.load(MODEL_PATH, map_location=device, weights_only=True)
         new_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-        net.load_state_dict(new_state_dict)
         
-        net.to(device)
-        net.eval()
+        net.load_state_dict(new_state_dict)
+        net.to(device).eval()
         logging.info("Model loaded successfully.")
     except Exception as e:
         logging.error(f"Failed to load model architecture: {e}")
         exit(1)
 
+    # Calculate model complexity parameters
     params, flops = calculate_complexity(net, INPUT_SHAPE, device)
 
     all_disease_results = []
@@ -223,14 +260,19 @@ if __name__ == '__main__':
 
     if all_disease_results:
         overall_df = pd.DataFrame(all_disease_results)
+        
+        # Move 'Disease' column to the front
         cols = ['Disease'] + [c for c in overall_df.columns if c != 'Disease']
         overall_df = overall_df[cols]
         
+        # Calculate overall mean across all diseases
         mean_row = overall_df.mean(numeric_only=True).to_dict()
         mean_row['Disease'] = 'OVERALL_MEAN'
+        
+        # Append the calculated overall mean to the dataframe
         overall_df = pd.concat([overall_df, pd.DataFrame([mean_row])], ignore_index=True)
         
-        Path(MAIN_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+        # Save to the main output directory
         mean_output_path = Path(MAIN_OUTPUT_DIR) / 'calculated_mean.xlsx'
         overall_df.to_excel(mean_output_path, index=False)
         logging.info(f"Overall means saved to {mean_output_path}")
