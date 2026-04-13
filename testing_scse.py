@@ -29,9 +29,9 @@ import segmentation_models_pytorch.segmentation_models_pytorch as smp
 # ==================================================
 # --- USER CONFIGURATION SECTION ---
 # ==================================================
-MODEL_PATH = 'CP_best.pth'
-BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset - Copy"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_9"
+MODEL_PATH = 'checkpoints\CP_best.pth'
+BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_10"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
