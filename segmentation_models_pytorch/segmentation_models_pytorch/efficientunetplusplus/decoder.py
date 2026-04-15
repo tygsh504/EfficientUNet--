@@ -5,51 +5,16 @@ import torch.nn.functional as F
 
 from ..base import modules as md
 
-class InvertedResidual(nn.Module):
-    """
-    Inverted bottleneck residual block with an scSE block embedded into the residual layer, after the 
-    depthwise convolution. By default, uses batch normalization and Hardswish activation.
-    """
-    def __init__(self, in_channels, out_channels, kernel_size = 3, stride = 1, expansion_ratio = 1, squeeze_ratio = 1, \
-        activation = nn.Hardswish(True), normalization = nn.BatchNorm2d):
-        super().__init__()
-        self.same_shape = in_channels == out_channels
-        self.mid_channels = expansion_ratio*in_channels
-        self.block = nn.Sequential(
-            md.PointWiseConv2d(in_channels, self.mid_channels),
-            normalization(self.mid_channels),
-            activation,
-            md.DepthWiseConv2d(self.mid_channels, kernel_size=kernel_size, stride=stride),
-            normalization(self.mid_channels),
-            activation,
-            #md.sSEModule(self.mid_channels),
-            md.SCSEModule(self.mid_channels, reduction = squeeze_ratio),
-            #md.SEModule(self.mid_channels, reduction = squeeze_ratio),
-            md.PointWiseConv2d(self.mid_channels, out_channels),
-            normalization(out_channels)
-        )
-        
-        if not self.same_shape:
-            # 1x1 convolution used to match the number of channels in the skip feature maps with that 
-            # of the residual feature maps
-            self.skip_conv = nn.Sequential(
-                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1),
-                normalization(out_channels)
-            )
-          
-    def forward(self, x):
-        residual = self.block(x)
-        
-        if not self.same_shape:
-            x = self.skip_conv(x)
-        return x + residual
-
 # class InvertedResidual(nn.Module):
-#     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, expansion_ratio=1, squeeze_ratio=1, 
-#                  activation=nn.Hardswish(True), normalization=nn.BatchNorm2d):
+#     """
+#     Inverted bottleneck residual block with an scSE block embedded into the residual layer, after the 
+#     depthwise convolution. By default, uses batch normalization and Hardswish activation.
+#     """
+#     def __init__(self, in_channels, out_channels, kernel_size = 3, stride = 1, expansion_ratio = 1, squeeze_ratio = 1, \
+#         activation = nn.Hardswish(True), normalization = nn.BatchNorm2d):
 #         super().__init__()
 #         self.same_shape = in_channels == out_channels
-#         self.mid_channels = expansion_ratio * in_channels
+#         self.mid_channels = expansion_ratio*in_channels
 #         self.block = nn.Sequential(
 #             md.PointWiseConv2d(in_channels, self.mid_channels),
 #             normalization(self.mid_channels),
@@ -57,13 +22,16 @@ class InvertedResidual(nn.Module):
 #             md.DepthWiseConv2d(self.mid_channels, kernel_size=kernel_size, stride=stride),
 #             normalization(self.mid_channels),
 #             activation,
-#             # Use the class from the modules file
-#             md.CoordAtt(self.mid_channels, self.mid_channels), 
+#             #md.sSEModule(self.mid_channels),
+#             md.SCSEModule(self.mid_channels, reduction = squeeze_ratio),
+#             #md.SEModule(self.mid_channels, reduction = squeeze_ratio),
 #             md.PointWiseConv2d(self.mid_channels, out_channels),
 #             normalization(out_channels)
 #         )
         
 #         if not self.same_shape:
+#             # 1x1 convolution used to match the number of channels in the skip feature maps with that 
+#             # of the residual feature maps
 #             self.skip_conv = nn.Sequential(
 #                 nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1),
 #                 normalization(out_channels)
@@ -71,9 +39,41 @@ class InvertedResidual(nn.Module):
           
 #     def forward(self, x):
 #         residual = self.block(x)
+        
 #         if not self.same_shape:
 #             x = self.skip_conv(x)
 #         return x + residual
+
+class InvertedResidual(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, expansion_ratio=1, squeeze_ratio=1, 
+                 activation=nn.Hardswish(True), normalization=nn.BatchNorm2d):
+        super().__init__()
+        self.same_shape = in_channels == out_channels
+        self.mid_channels = expansion_ratio * in_channels
+        self.block = nn.Sequential(
+            md.PointWiseConv2d(in_channels, self.mid_channels),
+            normalization(self.mid_channels),
+            activation,
+            md.DepthWiseConv2d(self.mid_channels, kernel_size=kernel_size, stride=stride),
+            normalization(self.mid_channels),
+            activation,
+            # Use the class from the modules file
+            md.CoordAtt(self.mid_channels, self.mid_channels), 
+            md.PointWiseConv2d(self.mid_channels, out_channels),
+            normalization(out_channels)
+        )
+        
+        if not self.same_shape:
+            self.skip_conv = nn.Sequential(
+                nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=1),
+                normalization(out_channels)
+            )
+          
+    def forward(self, x):
+        residual = self.block(x)
+        if not self.same_shape:
+            x = self.skip_conv(x)
+        return x + residual
         
 class DecoderBlock(nn.Module):
     def __init__(

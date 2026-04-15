@@ -382,6 +382,18 @@ if __name__ == '__main__':
 
     args = get_args()
 
+    # Clean up hidden system files that might crash the dataset loader
+    for d in [args.train_img_dir, args.train_mask_dir, args.val_img_dir, args.val_mask_dir]:
+        if d is not None and os.path.isdir(d):
+            for hidden_file in ['desktop.ini', '.DS_Store']:
+                filepath = os.path.join(d, hidden_file)
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                        logging.info(f"Removed hidden file: {filepath}")
+                    except OSError:
+                        pass
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f'Using device {device}')
 

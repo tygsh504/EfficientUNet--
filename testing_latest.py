@@ -35,8 +35,8 @@ except ImportError:
 # --- USER CONFIGURATION SECTION ---
 # =====================================================================
 MODEL_PATH = 'checkpoints\CP_best.pth'
-BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset - Copy"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_7"
+BASE_DATA_PATH = r"C:\Users\User\Desktop\testing dataset"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_14"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]
