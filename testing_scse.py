@@ -31,7 +31,7 @@ import segmentation_models_pytorch.segmentation_models_pytorch as smp
 # ==================================================
 MODEL_PATH = 'checkpoints\CP_best.pth'
 BASE_DATA_PATH = r"C:\Users\User\Desktop\Original Testing Dataset"
-MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_10"
+MAIN_OUTPUT_DIR = r"C:\Users\User\Desktop\b0_new_dataset_13"
 
 # The 7 disease folders
 DISEASES = ["Bacterial Leaf Blight", "Bacterial Leaf Streak", "Blast", "Brown Spot", "DownyMildew", "Hispa", "Tungro"]

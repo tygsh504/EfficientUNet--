@@ -350,7 +350,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
     
     # --- ADDED: Call the function immediately upon starting ---
-    set_seed(42)
+    set_seed(1209)
     # ---------------------------------------------------------
     
     args = get_args()
